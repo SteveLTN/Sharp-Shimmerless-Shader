@@ -27,24 +27,32 @@
 #define COMPAT_PRECISION
 #endif
 
+// Scale factors that fp16 can't store exactly misplace pixel edges (issue #4).
+// GL_FRAGMENT_PRECISION_HIGH is visible to both stages, so the uniform precisions match at link time.
+#if defined(GL_ES) && defined(GL_FRAGMENT_PRECISION_HIGH)
+#define SIZE_PRECISION highp
+#elif defined(GL_ES)
+#define SIZE_PRECISION mediump
+#else
+#define SIZE_PRECISION
+#endif
+
 COMPAT_ATTRIBUTE vec4 VertexCoord;
 COMPAT_ATTRIBUTE vec4 COLOR;
 COMPAT_ATTRIBUTE vec4 TexCoord;
 COMPAT_VARYING vec2 pixel;
-COMPAT_VARYING vec2 invscale;
 
 uniform mat4 MVPMatrix;
 uniform COMPAT_PRECISION int FrameDirection;
 uniform COMPAT_PRECISION int FrameCount;
-uniform COMPAT_PRECISION vec2 OutputSize;
-uniform COMPAT_PRECISION vec2 TextureSize;
-uniform COMPAT_PRECISION vec2 InputSize;
+uniform SIZE_PRECISION vec2 OutputSize;
+uniform SIZE_PRECISION vec2 TextureSize;
+uniform SIZE_PRECISION vec2 InputSize;
 
 void main()
 {
     gl_Position = MVPMatrix * VertexCoord;
     pixel = TexCoord.xy * OutputSize * TextureSize / InputSize;
-    invscale = InputSize / OutputSize;
 }
 
 #elif defined(FRAGMENT)
@@ -70,20 +78,30 @@ precision mediump float;
 #define COMPAT_PRECISION
 #endif
 
+// Scale factors that fp16 can't store exactly misplace pixel edges (issue #4).
+// GL_FRAGMENT_PRECISION_HIGH is visible to both stages, so the uniform precisions match at link time.
+#if defined(GL_ES) && defined(GL_FRAGMENT_PRECISION_HIGH)
+#define SIZE_PRECISION highp
+#elif defined(GL_ES)
+#define SIZE_PRECISION mediump
+#else
+#define SIZE_PRECISION
+#endif
+
 uniform COMPAT_PRECISION int FrameDirection;
 uniform COMPAT_PRECISION int FrameCount;
-uniform COMPAT_PRECISION vec2 OutputSize;
-uniform COMPAT_PRECISION vec2 TextureSize;
-uniform COMPAT_PRECISION vec2 InputSize;
+uniform SIZE_PRECISION vec2 OutputSize;
+uniform SIZE_PRECISION vec2 TextureSize;
+uniform SIZE_PRECISION vec2 InputSize;
 uniform sampler2D Texture;
 COMPAT_VARYING vec2 pixel;
-COMPAT_VARYING vec2 invscale;
 
 void main()
 {
     // Measure both edges in source coordinates so texel selection and blending agree.
-    vec2 pixel_tl = invscale * floor(pixel);
-    vec2 pixel_br = invscale * ceil(pixel);
+    // Multiplying before dividing keeps the rounding error from growing across the screen.
+    vec2 pixel_tl = floor(pixel) * InputSize / OutputSize;
+    vec2 pixel_br = ceil(pixel) * InputSize / OutputSize;
     vec2 texel_tl = floor(pixel_tl);
     vec2 texel_br = floor(pixel_br);
 
@@ -92,6 +110,8 @@ void main()
     vec2 width = mix(pixel_br - pixel_tl, vec2(1.0), same_texel);
     vec2 weight_br = mix(fract(pixel_br) / width, vec2(1.0), same_texel);
     vec2 mod_texel = texel_br - 0.5 + weight_br;
+    // Keep the far edge from blending in texels outside the game image.
+    mod_texel = clamp(mod_texel, vec2(0.5), InputSize - vec2(0.5));
 
     FragColor = vec4(COMPAT_TEXTURE(Texture, mod_texel / TextureSize).rgb, 1.0);
 } 
