@@ -31,8 +31,6 @@ COMPAT_ATTRIBUTE vec4 VertexCoord;
 COMPAT_ATTRIBUTE vec4 COLOR;
 COMPAT_ATTRIBUTE vec4 TexCoord;
 COMPAT_VARYING vec2 pixel;
-COMPAT_VARYING vec2 scale;
-COMPAT_VARYING vec2 invscale;
 
 uniform mat4 MVPMatrix;
 uniform COMPAT_PRECISION int FrameDirection;
@@ -45,8 +43,6 @@ void main()
 {
     gl_Position = MVPMatrix * VertexCoord;
     pixel = TexCoord.xy * OutputSize * TextureSize / InputSize;
-    scale = OutputSize / InputSize;
-    invscale = InputSize / OutputSize;
 }
 
 #elif defined(FRAGMENT)
@@ -78,23 +74,21 @@ uniform COMPAT_PRECISION vec2 OutputSize;
 uniform COMPAT_PRECISION vec2 TextureSize;
 uniform COMPAT_PRECISION vec2 InputSize;
 uniform sampler2D Texture;
-COMPAT_VARYING vec2 pixel; // texel to pixel scale
-COMPAT_VARYING vec2 scale; // pixel to texel scale
-COMPAT_VARYING vec2 invscale;
+COMPAT_VARYING vec2 pixel;
 
 void main()
 {
-    // pixel: output screen pixels
-    // texel: input texels == game pixels
-    vec2 pixel_tl = floor(pixel);   // top-left of the pixel
-    vec2 pixel_br = ceil(pixel);    // bottom-right of the pixel
-    vec2 texel_tl = floor(invscale * pixel_tl); // texel the top-left of the pixel lies in
-    vec2 texel_br = floor(invscale * pixel_br); // texel the bottom-right of the pixel lies in
+    // Preserve the pre-refactor sampling path for handheld GL drivers (issue #4).
+    vec2 pixel_tl = floor(pixel);
+    vec2 pixel_br = ceil(pixel);
+    vec2 scale = OutputSize / InputSize;
+    vec2 invscale = InputSize / OutputSize;
+    vec2 texel_tl = floor(invscale * pixel_tl);
+    vec2 texel_br = floor(invscale * pixel_br);
 
-    // the sampling point to get the correct box-filtered value
-    vec2 mod_texel = texel_br + vec2(0.5, 0.5);
-    mod_texel -= (vec2(1.0, 1.0) - step(texel_br, texel_tl)) * (scale * texel_br - pixel_tl);
-    
+    vec2 mod_texel = texel_br + 0.5 - scale * texel_br + pixel_tl;
+    mod_texel = mix(mod_texel, texel_br + 0.5, step(texel_br, texel_tl));
+
     FragColor = vec4(COMPAT_TEXTURE(Texture, mod_texel / TextureSize).rgb, 1.0);
 } 
 #endif
