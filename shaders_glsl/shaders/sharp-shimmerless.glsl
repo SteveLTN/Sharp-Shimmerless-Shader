@@ -99,9 +99,20 @@ COMPAT_VARYING vec2 pixel;
 void main()
 {
     // Measure both edges in source coordinates so texel selection and blending agree.
+#if defined(GL_ES) && !defined(GL_FRAGMENT_PRECISION_HIGH)
+    // pixel * InputSize can exceed the fp16 maximum (65504), so scale by a ratio instead.
+    // Its rounding error grows with distance from the anchor; anchoring at the center
+    // splits that drift evenly between opposite edges.
+    vec2 invscale = InputSize / OutputSize;
+    vec2 center_out = 0.5 * OutputSize;
+    vec2 center_in = 0.5 * InputSize;
+    vec2 pixel_tl = (floor(pixel) - center_out) * invscale + center_in;
+    vec2 pixel_br = (ceil(pixel) - center_out) * invscale + center_in;
+#else
     // Multiplying before dividing keeps the rounding error from growing across the screen.
     vec2 pixel_tl = floor(pixel) * InputSize / OutputSize;
     vec2 pixel_br = ceil(pixel) * InputSize / OutputSize;
+#endif
     vec2 texel_tl = floor(pixel_tl);
     vec2 texel_br = floor(pixel_br);
 
