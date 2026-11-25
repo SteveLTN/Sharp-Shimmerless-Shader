@@ -344,16 +344,22 @@ def parse_preset(path: Path) -> dict[str, str]:
 
 def test_presets_and_structure() -> None:
     expected_glsl_presets = [
-        ("shaders_glsl/sharp-shimmerless.glslp", 1),
-        ("shaders_glsl/sharp-shimmerless-gamma.glslp", 2),
+        ("shaders_glsl/sharp-shimmerless.glslp", 2),
         ("shaders_glsl/sharp-shimmerless-smooth-hq.glslp", 2),
-        ("shaders_glsl/sharp-shimmerless-gammacorrected.glslp", 2),
+        ("shaders_glsl/sharp-shimmerless-fast-fallback.glslp", 1),
     ]
     expected_slang_presets = [
         ("shaders_slang/sharp-shimmerless.slangp", 2),
-        ("shaders_slang/sharp-shimmerless-fast.slangp", 1),
         ("shaders_slang/sharp-shimmerless-smooth-hq.slangp", 2),
+        ("shaders_slang/sharp-shimmerless-fast-fallback.slangp", 1),
     ]
+    for retired in [
+        "shaders_glsl/sharp-shimmerless-gamma.glslp",
+        "shaders_glsl/sharp-shimmerless-gammacorrected.glslp",
+        "shaders_glsl/sharp-shimmerless-fast.glslp",
+        "shaders_slang/sharp-shimmerless-fast.slangp",
+    ]:
+        assert not (ROOT / retired).exists(), f"Retired duplicate preset still exists: {retired}"
     for rel, expected_passes in expected_glsl_presets + expected_slang_presets:
         p = ROOT / rel
         assert p.exists(), f"Missing preset: {rel}"
