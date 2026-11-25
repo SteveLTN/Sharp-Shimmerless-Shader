@@ -51,5 +51,6 @@ void main()
         vec3 hi = pow((c + 0.055) / 1.055, vec3(2.4));
         lin = mix(hi, lo, step(c, vec3(0.04045)));
     }
-    FragColor = vec4(lin, 1.0);
+    // Alpha > 1.0 survives only on unclamped floating-point FBOs; 8-bit UNORM clamps it to 1.0.
+    FragColor = vec4(lin, 2.0);
 }

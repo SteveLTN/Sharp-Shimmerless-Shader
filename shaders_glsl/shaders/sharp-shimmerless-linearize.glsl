@@ -4,6 +4,8 @@
  *
  * Pass 0 (1x source resolution): converts gamma-encoded RGB input into linear light
  * for hardware-accelerated bilinear blending in sharp-shimmerless-core.
+ * Writes alpha = 2.0 as an unclamped float-FBO canary so Pass 1 can detect silent
+ * 8-bit RGBA8 fallbacks on legacy GL drivers instead of crushing shadows.
  */
 
 #pragma parameter GAMMA_MODE "Gamma Curve (0=Fast 2.0, 1=Exact sRGB)" 0.0 0.0 1.0 1.0
@@ -107,6 +109,7 @@ void main()
         SIZE_PRECISION vec3 hi = pow((c + 0.055) / 1.055, vec3(2.4));
         lin = mix(hi, lo, step(c, vec3(0.04045)));
     }
-    FragColor = vec4(lin, 1.0);
+    // Alpha > 1.0 survives only on unclamped floating-point FBOs; 8-bit UNORM clamps it to 1.0.
+    FragColor = vec4(lin, 2.0);
 }
 #endif

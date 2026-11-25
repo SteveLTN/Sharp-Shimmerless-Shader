@@ -5,7 +5,9 @@
  *
  * Unified analytical shimmerless scaler using a single hardware bilinear fetch
  * with zero fragment divisions. Supports exact Box, C1 Tent, and Raised-Cosine
- * (Hann) partition-of-unity kernels, plus optional linear-to-sRGB output encoding.
+ * (Hann) partition-of-unity kernels, plus optional linear-to-sRGB output encoding
+ * with float-FBO canary detection (fails loud in solid magenta if a legacy GL
+ * driver silently fell back to an 8-bit clamped intermediate FBO).
  */
 
 #pragma parameter FILTER_MODE "Filter (0=Box, 1=Tent, 2=Hann)" 0.0 0.0 2.0 1.0
@@ -56,6 +58,8 @@ COMPAT_VARYING COMPAT_PRECISION vec2 scale_hi;
 COMPAT_VARYING COMPAT_PRECISION vec2 scale_mid;
 COMPAT_VARYING COMPAT_PRECISION vec2 scale_lo;
 COMPAT_VARYING COMPAT_PRECISION vec2 raw_scale_v;
+COMPAT_VARYING COMPAT_PRECISION vec2 half_in_v;
+COMPAT_VARYING COMPAT_PRECISION vec2 center_err_v;
 #endif
 
 uniform mat4 MVPMatrix;
@@ -80,18 +84,28 @@ void main()
     highp vec2 in_hp = InputSize;
     highp vec2 tex_hp = TextureSize;
     highp vec2 raw_scale = out_hp / in_hp;
-    pixel = TexCoord.xy * out_hp * tex_hp / in_hp;
+    highp vec2 pixel_hp = TexCoord.xy * out_hp * tex_hp / in_hp;
     invscale = in_hp / out_hp;
     invTextureSize = vec2(1.0) / tex_hp;
 #else
+    vec2 out_hp = OutputSize;
+    vec2 in_hp = InputSize;
     vec2 raw_scale = OutputSize / InputSize;
-    pixel = TexCoord.xy * OutputSize * TextureSize / InputSize;
+    vec2 pixel_hp = TexCoord.xy * OutputSize * TextureSize / InputSize;
     invscale = InputSize / OutputSize;
     invTextureSize = vec2(1.0) / TextureSize;
 #endif
     scale = max(raw_scale, vec2(1.0));
 #if USE_SPLIT_FP16
-    // Split raw_scale into exact power-of-2 slices so m * raw_scale stays exact in FP16 fragments.
+    // Center pixel around half_out so pixel centers (k + 0.5) stay <= 1024 in binary16
+    // (0.5 ULP up to 2048 px wide), avoiding rounding 1245.5 -> 1246 before floor().
+    vec2 half_out = floor(0.5 * out_hp);
+    vec2 half_in = floor(0.5 * in_hp);
+    pixel = pixel_hp - half_out;
+    half_in_v = half_in;
+    center_err_v = half_out - half_in * raw_scale;
+
+    // Split raw_scale into exact power-of-2 slices so mc * raw_scale stays exact in FP16 fragments.
     vec2 qstep = mix(vec2(8.0), vec2(4.0), step(vec2(8.0), raw_scale));
     vec2 s_hi = floor(raw_scale * qstep) / qstep;
     vec2 rem = raw_scale - s_hi;
@@ -100,6 +114,8 @@ void main()
     scale_mid = s_mid;
     scale_lo = rem - s_mid;
     raw_scale_v = raw_scale;
+#else
+    pixel = pixel_hp;
 #endif
 
     // Width-2 Tent/Hann fits inside 1 texel (1 bilinear fetch) iff scale >= 2.0.
@@ -162,6 +178,8 @@ COMPAT_VARYING COMPAT_PRECISION vec2 scale_hi;
 COMPAT_VARYING COMPAT_PRECISION vec2 scale_mid;
 COMPAT_VARYING COMPAT_PRECISION vec2 scale_lo;
 COMPAT_VARYING COMPAT_PRECISION vec2 raw_scale_v;
+COMPAT_VARYING COMPAT_PRECISION vec2 half_in_v;
+COMPAT_VARYING COMPAT_PRECISION vec2 center_err_v;
 #endif
 
 #ifdef PARAMETER_UNIFORM
@@ -175,18 +193,19 @@ uniform COMPAT_PRECISION float GAMMA_OUT;
 void main()
 {
 #if USE_SPLIT_FP16
-    // Without fragment highp, subtracting m * raw_scale in split FP16 chunks avoids
-    // rounding texel coords to 0.125-0.25 ULP and keeps exact integer scales blur-free.
-    COMPAT_PRECISION vec2 k = floor(pixel);
-    COMPAT_PRECISION vec2 tx_rough = (k - 0.5 * OutputSize) * invscale + 0.5 * InputSize;
-    COMPAT_PRECISION vec2 m = floor(tx_rough + 0.5);
-    COMPAT_PRECISION vec2 m_hi = 16.0 * floor(m * 0.0625);
-    COMPAT_PRECISION vec2 m_lo = m - m_hi;
-    COMPAT_PRECISION vec2 d = ((((k - m_hi * scale_hi) - m_lo * scale_hi) - m_hi * scale_mid) - m_lo * scale_mid) + 0.5 - m * scale_lo;
+    // Without fragment highp, centered pixel coordinates keep k + 0.5 exact in binary16
+    // up to 2048 px wide, and split-FP16 subtraction avoids 0.125-0.25 texel rounding error.
+    COMPAT_PRECISION vec2 kc = floor(pixel);
+    COMPAT_PRECISION vec2 tx_c = (kc + center_err_v) * invscale;
+    COMPAT_PRECISION vec2 mc = floor(tx_c + 0.5);
+    COMPAT_PRECISION vec2 mc_hi = 16.0 * floor(mc * 0.0625);
+    COMPAT_PRECISION vec2 mc_lo = mc - mc_hi;
+    COMPAT_PRECISION vec2 d = ((((kc - mc_hi * scale_hi) - mc_lo * scale_hi) - mc_hi * scale_mid) - mc_lo * scale_mid) + (0.5 + center_err_v) - mc * scale_lo;
     COMPAT_PRECISION vec2 half_s = 0.5 * raw_scale_v;
     COMPAT_PRECISION vec2 adj = step(half_s, d) - step(d, -half_s);
-    m += adj;
+    mc += adj;
     d -= adj * raw_scale_v;
+    COMPAT_PRECISION vec2 m = mc + half_in_v;
 #else
     // Snap to exact output pixel centers to eliminate hardware barycentric interpolation jitter.
     SIZE_PRECISION vec2 texel = (floor(pixel) + 0.5) * invscale;
@@ -212,17 +231,23 @@ void main()
 #if USE_SPLIT_FP16
     // Keep w separate from large m before multiplying by invTextureSize to preserve FP16 UV precision.
     COMPAT_PRECISION vec2 uv_up = m * invTextureSize + (w - 0.5) * invTextureSize;
-    COMPAT_PRECISION vec2 uv_dn = (tx_rough + 0.5 * invscale) * invTextureSize;
+    COMPAT_PRECISION vec2 uv_dn = (half_in_v + tx_c + 0.5 * invscale) * invTextureSize;
     COMPAT_PRECISION vec2 uv = mix(uv_dn, uv_up, step(vec2(1.0), raw_scale_v));
     uv = clamp(uv, vec2(0.5) * invTextureSize, (InputSize - vec2(0.5)) * invTextureSize);
-    SIZE_PRECISION vec3 color = COMPAT_TEXTURE(Texture, uv).rgb;
+    SIZE_PRECISION vec4 sample_rgba = COMPAT_TEXTURE(Texture, uv);
 #else
     // Prevent sampling padded texels outside the active game image.
     SIZE_PRECISION vec2 u = clamp(m - 0.5 + w, vec2(0.5), InputSize - vec2(0.5));
-    SIZE_PRECISION vec3 color = COMPAT_TEXTURE(Texture, u * invTextureSize).rgb;
+    SIZE_PRECISION vec4 sample_rgba = COMPAT_TEXTURE(Texture, u * invTextureSize);
 #endif
+    SIZE_PRECISION vec3 color = sample_rgba.rgb;
 
     if (GAMMA_OUT > 0.5) {
+        // Fail loudly in solid magenta if Pass 0's float_framebuffer fell back to clamped 8-bit RGBA8.
+        if (sample_rgba.a < 1.5) {
+            FragColor = vec4(1.0, 0.0, 1.0, 1.0);
+            return;
+        }
         color = max(color, vec3(0.0));
         if (GAMMA_OUT < 1.5) {
             color = sqrt(color);

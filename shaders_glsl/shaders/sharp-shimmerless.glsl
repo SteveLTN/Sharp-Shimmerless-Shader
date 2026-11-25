@@ -53,6 +53,8 @@ COMPAT_VARYING COMPAT_PRECISION vec2 scale_hi;
 COMPAT_VARYING COMPAT_PRECISION vec2 scale_mid;
 COMPAT_VARYING COMPAT_PRECISION vec2 scale_lo;
 COMPAT_VARYING COMPAT_PRECISION vec2 raw_scale_v;
+COMPAT_VARYING COMPAT_PRECISION vec2 half_in_v;
+COMPAT_VARYING COMPAT_PRECISION vec2 center_err_v;
 #endif
 
 uniform mat4 MVPMatrix;
@@ -70,17 +72,25 @@ void main()
     highp vec2 in_hp = InputSize;
     highp vec2 tex_hp = TextureSize;
     highp vec2 raw_scale = out_hp / in_hp;
-    pixel = TexCoord.xy * out_hp * tex_hp / in_hp;
+    highp vec2 pixel_hp = TexCoord.xy * out_hp * tex_hp / in_hp;
     invscale = in_hp / out_hp;
     invTextureSize = vec2(1.0) / tex_hp;
 #else
+    vec2 out_hp = OutputSize;
+    vec2 in_hp = InputSize;
     vec2 raw_scale = OutputSize / InputSize;
-    pixel = TexCoord.xy * OutputSize * TextureSize / InputSize;
+    vec2 pixel_hp = TexCoord.xy * OutputSize * TextureSize / InputSize;
     invscale = InputSize / OutputSize;
     invTextureSize = vec2(1.0) / TextureSize;
 #endif
     scale = max(raw_scale, vec2(1.0));
 #if USE_SPLIT_FP16
+    vec2 half_out = floor(0.5 * out_hp);
+    vec2 half_in = floor(0.5 * in_hp);
+    pixel = pixel_hp - half_out;
+    half_in_v = half_in;
+    center_err_v = half_out - half_in * raw_scale;
+
     vec2 qstep = mix(vec2(8.0), vec2(4.0), step(vec2(8.0), raw_scale));
     vec2 s_hi = floor(raw_scale * qstep) / qstep;
     vec2 rem = raw_scale - s_hi;
@@ -89,6 +99,8 @@ void main()
     scale_mid = s_mid;
     scale_lo = rem - s_mid;
     raw_scale_v = raw_scale;
+#else
+    pixel = pixel_hp;
 #endif
 }
 
@@ -144,24 +156,27 @@ COMPAT_VARYING COMPAT_PRECISION vec2 scale_hi;
 COMPAT_VARYING COMPAT_PRECISION vec2 scale_mid;
 COMPAT_VARYING COMPAT_PRECISION vec2 scale_lo;
 COMPAT_VARYING COMPAT_PRECISION vec2 raw_scale_v;
+COMPAT_VARYING COMPAT_PRECISION vec2 half_in_v;
+COMPAT_VARYING COMPAT_PRECISION vec2 center_err_v;
 #endif
 
 void main()
 {
 #if USE_SPLIT_FP16
-    COMPAT_PRECISION vec2 k = floor(pixel);
-    COMPAT_PRECISION vec2 tx_rough = (k - 0.5 * OutputSize) * invscale + 0.5 * InputSize;
-    COMPAT_PRECISION vec2 m = floor(tx_rough + 0.5);
-    COMPAT_PRECISION vec2 m_hi = 16.0 * floor(m * 0.0625);
-    COMPAT_PRECISION vec2 m_lo = m - m_hi;
-    COMPAT_PRECISION vec2 d = ((((k - m_hi * scale_hi) - m_lo * scale_hi) - m_hi * scale_mid) - m_lo * scale_mid) + 0.5 - m * scale_lo;
+    COMPAT_PRECISION vec2 kc = floor(pixel);
+    COMPAT_PRECISION vec2 tx_c = (kc + center_err_v) * invscale;
+    COMPAT_PRECISION vec2 mc = floor(tx_c + 0.5);
+    COMPAT_PRECISION vec2 mc_hi = 16.0 * floor(mc * 0.0625);
+    COMPAT_PRECISION vec2 mc_lo = mc - mc_hi;
+    COMPAT_PRECISION vec2 d = ((((kc - mc_hi * scale_hi) - mc_lo * scale_hi) - mc_hi * scale_mid) - mc_lo * scale_mid) + (0.5 + center_err_v) - mc * scale_lo;
     COMPAT_PRECISION vec2 half_s = 0.5 * raw_scale_v;
     COMPAT_PRECISION vec2 adj = step(half_s, d) - step(d, -half_s);
-    m += adj;
+    mc += adj;
     d -= adj * raw_scale_v;
+    COMPAT_PRECISION vec2 m = mc + half_in_v;
     COMPAT_PRECISION vec2 w = clamp(d + 0.5, 0.0, 1.0);
     COMPAT_PRECISION vec2 uv_up = m * invTextureSize + (w - 0.5) * invTextureSize;
-    COMPAT_PRECISION vec2 uv_dn = (tx_rough + 0.5 * invscale) * invTextureSize;
+    COMPAT_PRECISION vec2 uv_dn = (half_in_v + tx_c + 0.5 * invscale) * invTextureSize;
     COMPAT_PRECISION vec2 uv = mix(uv_dn, uv_up, step(vec2(1.0), raw_scale_v));
     uv = clamp(uv, vec2(0.5) * invTextureSize, (InputSize - vec2(0.5)) * invTextureSize);
     FragColor = vec4(COMPAT_TEXTURE(Texture, uv).rgb, 1.0);

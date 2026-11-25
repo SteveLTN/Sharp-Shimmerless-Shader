@@ -233,6 +233,7 @@ class GLContext:
         out_size: tuple[int, int],
         *,
         fbo0_tex_size: tuple[int, int] | None = None,
+        fbo0_float: bool = True,
         pass0_params: dict[str, float] | None = None,
         pass1_params: dict[str, float] | None = None,
     ) -> bytes:
@@ -243,20 +244,23 @@ class GLContext:
         # Pre-fill mid FBO with bright magenta padding when padded so any border bleed is caught.
         pad_data = None
         if fbo0_tex_size != in_size:
-            pad_vals = (F * (4 * fbo0_tex_size[0] * fbo0_tex_size[1]))()
-            for idx in range(0, len(pad_vals), 4):
-                pad_vals[idx] = 1.0
-                pad_vals[idx + 1] = 0.0
-                pad_vals[idx + 2] = 1.0
-                pad_vals[idx + 3] = 1.0
-            pad_data = bytes(pad_vals)
+            if fbo0_float:
+                pad_vals = (F * (4 * fbo0_tex_size[0] * fbo0_tex_size[1]))()
+                for idx in range(0, len(pad_vals), 4):
+                    pad_vals[idx] = 1.0
+                    pad_vals[idx + 1] = 0.0
+                    pad_vals[idx + 2] = 1.0
+                    pad_vals[idx + 3] = 2.0
+                pad_data = bytes(pad_vals)
+            else:
+                pad_data = bytes((255, 0, 255, 255)) * (fbo0_tex_size[0] * fbo0_tex_size[1])
         mid_tex = self.create_texture(
             fbo0_tex_size[0],
             fbo0_tex_size[1],
             pad_data,
             linear=True,
-            internal_format=GL_RGBA16F,
-            pixel_type=GL_FLOAT,
+            internal_format=GL_RGBA16F if fbo0_float else GL_RGBA8,
+            pixel_type=GL_FLOAT if fbo0_float else GL_UNSIGNED_BYTE,
         )
         fbo0 = self.create_fbo(mid_tex)
         out_tex = self.create_texture(out_size[0], out_size[1], None, linear=False)
@@ -347,6 +351,7 @@ def test_presets_and_structure() -> None:
         ("shaders_glsl/sharp-shimmerless.glslp", 2),
         ("shaders_glsl/sharp-shimmerless-smooth-hq.glslp", 2),
         ("shaders_glsl/sharp-shimmerless-fast-fallback.glslp", 1),
+        ("shaders_glsl/sharp-shimmerless-gammacorrected.glslp", 2),
     ]
     expected_slang_presets = [
         ("shaders_slang/sharp-shimmerless.slangp", 2),
@@ -355,7 +360,6 @@ def test_presets_and_structure() -> None:
     ]
     for retired in [
         "shaders_glsl/sharp-shimmerless-gamma.glslp",
-        "shaders_glsl/sharp-shimmerless-gammacorrected.glslp",
         "shaders_glsl/sharp-shimmerless-fast.glslp",
         "shaders_slang/sharp-shimmerless-fast.slangp",
     ]:
@@ -472,10 +476,25 @@ def test_fp16_drift_immunity(gl: GLContext) -> None:
             )
             assert max_err <= 1.5, f"{label} {in_sz}->{out_sz}: max_err={max_err:.2f}/255"
 
-    # Strict IEEE binary16 simulation of the !GL_FRAGMENT_PRECISION_HIGH split-FP16 fragment math
+    # Strict end-to-end IEEE binary16 simulation of the !GL_FRAGMENT_PRECISION_HIGH centered split-FP16 path:
+    # models binary16 rounding of both the interpolated pixel coordinate AND the final texture UV.
     h = float16_round
-    for n_in, m_out, tol in [(320, 960, 0.0), (240, 480, 0.0), (256, 640, 0.0), (240, 640, 0.01), (240, 1278, 0.01), (320, 1024, 0.01)]:
+    fp16_cases = [
+        (320, 960, 512, 0.0, 0.0),
+        (240, 480, 256, 0.0, 0.0),
+        (256, 640, 256, 0.0, 0.0),
+        (240, 640, 256, 0.01, 0.125),
+        (160, 427, 256, 0.01, 0.125),
+        (240, 1278, 256, 0.01, 0.125),
+        (240, 1272, 256, 0.01, 0.125),
+        (241, 1279, 256, 0.01, 0.125),
+        (320, 1024, 512, 0.01, 0.125),
+    ]
+    for n_in, m_out, t_sz, w_tol, uv_tol in fp16_cases:
         raw_scale = m_out / n_in
+        half_out = floor(0.5 * m_out)
+        half_in = floor(0.5 * n_in)
+        center_err = half_out - half_in * raw_scale
         qstep = 4.0 if raw_scale >= 8.0 else 8.0
         s_hi = h(floor(raw_scale * qstep) / qstep)
         rem = raw_scale - s_hi
@@ -483,27 +502,76 @@ def test_fp16_drift_immunity(gl: GLContext) -> None:
         s_lo = h(rem - s_mid)
         inv_h = h(n_in / m_out)
         rs_h = h(raw_scale)
-        co, ci = h(0.5 * m_out), h(0.5 * n_in)
+        ce_h = h(center_err)
+        hi_in_h = h(half_in)
+        inv_tex = h(1.0 / t_sz)
+        uv_min = h(0.5 * inv_tex)
+        uv_max = h(h(n_in - 0.5) * inv_tex)
         max_w_err = 0.0
+        max_uv_err = 0.0
         for k in range(m_out):
             a, b = k * n_in / m_out, (k + 1) * n_in / m_out
             ta, tb = floor(a), floor(b)
             ref_u = (ta + 0.5) if (tb <= ta or b == tb) else (tb - 0.5 + (b - tb) / (b - a))
-            kf = h(k)
-            tx_rough = h(h(h(kf - co) * inv_h) + ci)
-            m = floor(h(tx_rough + 0.5))
-            m_hi = h(16.0 * floor(h(m * 0.0625)))
-            m_lo = h(m - m_hi)
-            d = h(h(h(h(h(kf - h(m_hi * s_hi)) - h(m_lo * s_hi)) - h(m_hi * s_mid)) - h(m_lo * s_mid)) + 0.5)
-            d = h(d - h(m * s_lo))
+            pix_c = h((k + 0.5) - half_out)
+            kc = floor(pix_c)
+            tx_c = h(h(kc + ce_h) * inv_h)
+            mc = floor(h(tx_c + 0.5))
+            mc_hi = h(16.0 * floor(h(mc * 0.0625)))
+            mc_lo = h(mc - mc_hi)
+            d = h(h(h(h(h(kc - h(mc_hi * s_hi)) - h(mc_lo * s_hi)) - h(mc_hi * s_mid)) - h(mc_lo * s_mid)) + h(0.5 + ce_h))
+            d = h(d - h(mc * s_lo))
             half_s = h(0.5 * rs_h)
             adj = (1.0 if d >= half_s else 0.0) - (1.0 if d <= -half_s else 0.0)
-            m = h(m + adj)
+            mc = h(mc + adj)
             d = h(d - h(adj * rs_h))
             w = min(1.0, max(0.0, h(d + 0.5)))
+            m = h(mc + hi_in_h)
+            uv_fp16 = min(uv_max, max(uv_min, h(h(m * inv_tex) + h(h(w - 0.5) * inv_tex))))
             max_w_err = max(max_w_err, abs((m - 0.5 + w) - ref_u))
-        assert max_w_err <= tol, f"Binary16 split fallback {n_in}->{m_out}: max_w_err={max_w_err:.5f} > {tol}"
-    print("[PASS] Issue #4 FP16 scale immunity + strict binary16 split fallback (320->960 exact 0.0000)")
+            max_uv_err = max(max_uv_err, abs(uv_fp16 * t_sz - ref_u))
+            if n_in == 240 and m_out == 1278 and k == 1245:
+                assert abs(uv_fp16 * t_sz - 233.5) < 1e-4, f"240->1278 col 1245 drifted: {uv_fp16 * t_sz}"
+        assert max_w_err <= w_tol, f"Binary16 split fallback {n_in}->{m_out}: max_w_err={max_w_err:.5f} > {w_tol}"
+        assert max_uv_err <= uv_tol, f"Binary16 UV fallback {n_in}->{m_out}: max_uv_err={max_uv_err:.4f} > {uv_tol}"
+    print("[PASS] Issue #4 FP16 scale immunity + end-to-end binary16 centered split (320->960 & col 1245 exact)")
+
+
+def test_float_fbo_canary_fails_loud_on_rgba8(gl: GLContext) -> None:
+    lin_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-linearize.glsl").read_text()
+    core_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-core.glsl").read_text()
+    in_sz, out_sz = (16, 16), (32, 32)
+    in_rgba = make_pattern_rgba(in_sz[0], in_sz[1], in_sz[0], in_sz[1])
+
+    # Real RGBA16F intermediate must render normally (never magenta error screen)
+    ok_out = gl.render_2pass(
+        lin_src,
+        core_src,
+        in_rgba,
+        in_sz,
+        in_sz,
+        out_sz,
+        fbo0_float=True,
+        pass0_params={"GAMMA_MODE": 0.0},
+        pass1_params={"FILTER_MODE": 0.0, "GAMMA_OUT": 1.0},
+    )
+    assert any(ok_out[i + 1] > 0 for i in range(0, len(ok_out), 4)), "RGBA16F falsely triggered magenta canary"
+
+    # Simulated legacy gl2.c 8-bit RGBA8 fallback must fail loudly (100% solid magenta)
+    err_out = gl.render_2pass(
+        lin_src,
+        core_src,
+        in_rgba,
+        in_sz,
+        in_sz,
+        out_sz,
+        fbo0_float=False,
+        pass0_params={"GAMMA_MODE": 0.0},
+        pass1_params={"FILTER_MODE": 0.0, "GAMMA_OUT": 1.0},
+    )
+    pixels = {(err_out[i], err_out[i + 1], err_out[i + 2]) for i in range(0, len(err_out), 4)}
+    assert pixels == {(255, 0, 255)}, f"Expected solid magenta on RGBA8 fallback, got {pixels}"
+    print("[PASS] Float-FBO alpha canary: normal on RGBA16F, fails loud (solid magenta) on RGBA8 fallback")
 
 
 def test_downscale_fallback(gl: GLContext) -> None:
@@ -658,6 +726,7 @@ def main() -> int:
     test_presets_and_structure()
     test_box_equivalence_and_padding(gl)
     test_fp16_drift_immunity(gl)
+    test_float_fbo_canary_fails_loud_on_rgba8(gl)
     test_downscale_fallback(gl)
     test_luminance_conservation_and_smooth_hq(gl)
     test_slang_syntax_parity(gl)

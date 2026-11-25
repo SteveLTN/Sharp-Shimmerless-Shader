@@ -82,9 +82,15 @@ void main()
     }
 
     vec2 u = clamp(m - 0.5 + w, vec2(0.5), params.SourceSize.xy - vec2(0.5));
-    vec3 color = texture(Source, u * params.SourceSize.zw).rgb;
+    vec4 sample_rgba = texture(Source, u * params.SourceSize.zw);
+    vec3 color = sample_rgba.rgb;
 
     if (params.GAMMA_OUT > 0.5) {
+        // Fail loudly in solid magenta if Pass 0 did not provide an unclamped float FBO.
+        if (sample_rgba.a < 1.5) {
+            FragColor = vec4(1.0, 0.0, 1.0, 1.0);
+            return;
+        }
         color = max(color, vec3(0.0));
         if (params.GAMMA_OUT < 1.5) {
             color = sqrt(color);
