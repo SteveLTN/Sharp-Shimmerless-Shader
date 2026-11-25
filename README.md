@@ -48,6 +48,17 @@ It interpolates pixels based on how much area an input pixel would occupy on an 
 
 Hence, it achieves both minimal number of interpolated pixels and ideal anti aliasing, i.e. **NO SHIMMERING**!
 
+## Presets
+
+Both GLSL (`shaders_glsl/`) and Slang (`shaders_slang/`) ship three main presets built on a shared zero-division analytical core:
+
+* **`sharp-shimmerless`** *(Recommended default)* — 2-pass linear-light box filter. Linearizes at 1× source resolution into a half-float framebuffer so hardware bilinear filtering blends in linear light with a single texture fetch at output resolution, eliminating both geometric and brightness shimmering. Ideal for 640×480 handhelds and general displays.
+* **`sharp-shimmerless-smooth-hq`** — 2-pass linear-light $C^1$ band-limited filter (Tent by default, Hann selectable via shader parameters) for high-PPI displays (such as 1024×768 TrimUI Brick, 720p, 1080p+). Automatically snaps exact integer axes (e.g. 256 px → 1024 px = 4×) and scale factors $< 2\times$ back to the box filter.
+* **`sharp-shimmerless-fast`** — 1-pass sRGB box filter fallback for legacy GLES 2.0 drivers without linear half-float FBO support or ultra-low-power devices. Uses a single texture fetch and zero fragment divisions, at the cost of sRGB edge darkening on high-contrast seams.
+
+### Color Correction (GBA / GBC)
+Core-side color correction (mGBA, Gambatte, SameBoy) outputs standard sRGB prior to shader execution and works seamlessly with all presets. If using shader-side color correction (`gba-color` / `gbc-color`), prepend it at `1x source` *before* `sharp-shimmerless-linearize` rather than after scaling.
+
 ### Curvature Shaders
 Applies CRT-like curvature.
 `-curvature-grid` and `curvature-scanlines` versions combines curvature and grid/scanline effects.
@@ -62,7 +73,5 @@ It supports subpixel rendering by offsetting positions of output pixels per each
 
 Subpixel shaders need to sample input pixels three times per output pixel, and this could make them significantly slower than the basic shader.
 
-### Gamma Corrected Shader
-This is the ideal way, but it requires four texture sampling per output pixel, making it slow.
-
-All other versions leverage OpenGL bilinear filtering to interpolate colors in linear space in a single texture sampling.
+### Gamma Corrected Preset
+`sharp-shimmerless-gammacorrected.glslp` now uses the fast 2-pass linear-light pipeline in exact sRGB EOTF/OETF mode (`GAMMA_MODE = 1`, `GAMMA_OUT = 2`), replacing the slow 4-tap single-pass implementation.
