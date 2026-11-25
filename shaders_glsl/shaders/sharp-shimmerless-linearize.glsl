@@ -86,7 +86,8 @@ uniform COMPAT_PRECISION int FrameCount;
 uniform SIZE_PRECISION vec2 OutputSize;
 uniform SIZE_PRECISION vec2 TextureSize;
 uniform SIZE_PRECISION vec2 InputSize;
-uniform sampler2D Texture;
+// GLSL ES defaults sampler2D to lowp; match fragment precision to preserve linear shadow detail.
+uniform SIZE_PRECISION sampler2D Texture;
 COMPAT_VARYING SIZE_PRECISION vec2 vTexCoord;
 
 #ifdef PARAMETER_UNIFORM
@@ -97,13 +98,13 @@ uniform COMPAT_PRECISION float GAMMA_MODE;
 
 void main()
 {
-    COMPAT_PRECISION vec3 c = COMPAT_TEXTURE(Texture, vTexCoord).rgb;
-    COMPAT_PRECISION vec3 lin;
+    SIZE_PRECISION vec3 c = COMPAT_TEXTURE(Texture, vTexCoord).rgb;
+    SIZE_PRECISION vec3 lin;
     if (GAMMA_MODE < 0.5) {
         lin = c * c;
     } else {
-        COMPAT_PRECISION vec3 lo = c / 12.92;
-        COMPAT_PRECISION vec3 hi = pow((c + 0.055) / 1.055, vec3(2.4));
+        SIZE_PRECISION vec3 lo = c / 12.92;
+        SIZE_PRECISION vec3 hi = pow((c + 0.055) / 1.055, vec3(2.4));
         lin = mix(hi, lo, step(c, vec3(0.04045)));
     }
     FragColor = vec4(lin, 1.0);

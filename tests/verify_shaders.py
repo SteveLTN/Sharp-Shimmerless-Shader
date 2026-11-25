@@ -344,21 +344,22 @@ def parse_preset(path: Path) -> dict[str, str]:
 
 def test_presets_and_structure() -> None:
     expected_glsl_presets = [
-        "shaders_glsl/sharp-shimmerless.glslp",
-        "shaders_glsl/sharp-shimmerless-fast.glslp",
-        "shaders_glsl/sharp-shimmerless-smooth-hq.glslp",
-        "shaders_glsl/sharp-shimmerless-gammacorrected.glslp",
+        ("shaders_glsl/sharp-shimmerless.glslp", 1),
+        ("shaders_glsl/sharp-shimmerless-gamma.glslp", 2),
+        ("shaders_glsl/sharp-shimmerless-smooth-hq.glslp", 2),
+        ("shaders_glsl/sharp-shimmerless-gammacorrected.glslp", 2),
     ]
     expected_slang_presets = [
-        "shaders_slang/sharp-shimmerless.slangp",
-        "shaders_slang/sharp-shimmerless-fast.slangp",
-        "shaders_slang/sharp-shimmerless-smooth-hq.slangp",
+        ("shaders_slang/sharp-shimmerless.slangp", 2),
+        ("shaders_slang/sharp-shimmerless-fast.slangp", 1),
+        ("shaders_slang/sharp-shimmerless-smooth-hq.slangp", 2),
     ]
-    for rel in expected_glsl_presets + expected_slang_presets:
+    for rel, expected_passes in expected_glsl_presets + expected_slang_presets:
         p = ROOT / rel
         assert p.exists(), f"Missing preset: {rel}"
         cfg = parse_preset(p)
         n = int(cfg["shaders"])
+        assert n == expected_passes, f"{rel}: expected {expected_passes} pass(es), got {n}"
         declared_params: set[str] = set()
         for i in range(n):
             sp = (p.parent / cfg[f"shader{i}"]).resolve()
@@ -377,7 +378,16 @@ def test_presets_and_structure() -> None:
             assert cfg.get("filter_linear1") == "true", f"{rel}: pass 1 must enable filter_linear1"
         else:
             assert cfg.get("filter_linear0") == "true", f"{rel}: 1-pass preset must enable filter_linear0"
-    print("[PASS] Preset structure, paths, and parameter consistency (GLSL + Slang)")
+
+    # GLES defaults unqualified sampler2D to lowp; verify explicit SIZE_PRECISION on all GLSL shaders.
+    for rel in [
+        "shaders_glsl/shaders/sharp-shimmerless-linearize.glsl",
+        "shaders_glsl/shaders/sharp-shimmerless-core.glsl",
+        "shaders_glsl/shaders/sharp-shimmerless.glsl",
+    ]:
+        src = (ROOT / rel).read_text()
+        assert "uniform SIZE_PRECISION sampler2D Texture;" in src, f"{rel}: sampler2D must declare SIZE_PRECISION"
+    print("[PASS] Preset structure, GLES sampler precision, and parameter consistency (GLSL + Slang)")
 
 
 def test_box_equivalence_and_padding(gl: GLContext) -> None:
@@ -414,6 +424,7 @@ def test_box_equivalence_and_padding(gl: GLContext) -> None:
 
 def test_fp16_drift_immunity(gl: GLContext) -> None:
     core_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-core.glsl").read_text()
+    base_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless.glsl").read_text()
     for in_sz, out_sz in [((240, 160), (1278, 852)), ((240, 160), (1272, 720))]:
         in_rgba = make_pattern_rgba(in_sz[0], in_sz[1], in_sz[0], in_sz[1])
         exact = gl.render_1pass(
@@ -421,8 +432,8 @@ def test_fp16_drift_immunity(gl: GLContext) -> None:
         )
         sx = float16_round(out_sz[0] / in_sz[0])
         sy = float16_round(out_sz[1] / in_sz[1])
-        assert "raw_scale = OutputSize / InputSize;" in core_src
-        stressed_src = core_src.replace("raw_scale = OutputSize / InputSize;", f"raw_scale = vec2({sx!r}, {sy!r});")
+        assert "vec2 raw_scale = OutputSize / InputSize;" in core_src
+        stressed_src = core_src.replace("vec2 raw_scale = OutputSize / InputSize;", f"vec2 raw_scale = vec2({sx!r}, {sy!r});")
         stressed = gl.render_1pass(
             stressed_src, in_rgba, in_sz, in_sz, out_sz, params={"FILTER_MODE": 0.0, "GAMMA_OUT": 0.0}, defines=["PARAMETER_UNIFORM"]
         )
@@ -431,7 +442,62 @@ def test_fp16_drift_immunity(gl: GLContext) -> None:
             for i in range(0, len(exact), 4)
         ]
         assert max(diffs) <= 1, f"FP16 scale drift at {in_sz}->{out_sz}: max diff={max(diffs)}/255"
-    print("[PASS] Issue #4 FP16 scale-rounding immunity (0 pixels drift > 1/255)")
+
+    # Exercise the !GL_FRAGMENT_PRECISION_HIGH split-FP16 shader path directly on GPU
+    for label, src, params in [
+        ("core(split-fp16)", core_src, {"FILTER_MODE": 0.0, "GAMMA_OUT": 0.0}),
+        ("base(split-fp16)", base_src, {}),
+    ]:
+        for in_sz, tex_sz, out_sz in [((320, 240), (512, 256), (960, 720)), ((240, 160), (256, 256), (1278, 852))]:
+            in_rgba = make_pattern_rgba(in_sz[0], in_sz[1], tex_sz[0], tex_sz[1])
+            ref = exact_box_reference_2d(in_rgba, in_sz[0], in_sz[1], tex_sz[0], out_sz[0], out_sz[1])
+            got = gl.render_1pass(
+                src,
+                in_rgba,
+                in_sz,
+                tex_sz,
+                out_sz,
+                params=params,
+                defines=["PARAMETER_UNIFORM", "SHIMMERLESS_FORCE_SPLIT_FP16"],
+            )
+            max_err = max(
+                max(abs(got[4 * i] - r), abs(got[4 * i + 1] - g), abs(got[4 * i + 2] - b))
+                for i, (r, g, b) in enumerate(ref)
+            )
+            assert max_err <= 1.5, f"{label} {in_sz}->{out_sz}: max_err={max_err:.2f}/255"
+
+    # Strict IEEE binary16 simulation of the !GL_FRAGMENT_PRECISION_HIGH split-FP16 fragment math
+    h = float16_round
+    for n_in, m_out, tol in [(320, 960, 0.0), (240, 480, 0.0), (256, 640, 0.0), (240, 640, 0.01), (240, 1278, 0.01), (320, 1024, 0.01)]:
+        raw_scale = m_out / n_in
+        qstep = 4.0 if raw_scale >= 8.0 else 8.0
+        s_hi = h(floor(raw_scale * qstep) / qstep)
+        rem = raw_scale - s_hi
+        s_mid = h(floor(rem * 8192.0 + 0.5) / 8192.0)
+        s_lo = h(rem - s_mid)
+        inv_h = h(n_in / m_out)
+        rs_h = h(raw_scale)
+        co, ci = h(0.5 * m_out), h(0.5 * n_in)
+        max_w_err = 0.0
+        for k in range(m_out):
+            a, b = k * n_in / m_out, (k + 1) * n_in / m_out
+            ta, tb = floor(a), floor(b)
+            ref_u = (ta + 0.5) if (tb <= ta or b == tb) else (tb - 0.5 + (b - tb) / (b - a))
+            kf = h(k)
+            tx_rough = h(h(h(kf - co) * inv_h) + ci)
+            m = floor(h(tx_rough + 0.5))
+            m_hi = h(16.0 * floor(h(m * 0.0625)))
+            m_lo = h(m - m_hi)
+            d = h(h(h(h(h(kf - h(m_hi * s_hi)) - h(m_lo * s_hi)) - h(m_hi * s_mid)) - h(m_lo * s_mid)) + 0.5)
+            d = h(d - h(m * s_lo))
+            half_s = h(0.5 * rs_h)
+            adj = (1.0 if d >= half_s else 0.0) - (1.0 if d <= -half_s else 0.0)
+            m = h(m + adj)
+            d = h(d - h(adj * rs_h))
+            w = min(1.0, max(0.0, h(d + 0.5)))
+            max_w_err = max(max_w_err, abs((m - 0.5 + w) - ref_u))
+        assert max_w_err <= tol, f"Binary16 split fallback {n_in}->{m_out}: max_w_err={max_w_err:.5f} > {tol}"
+    print("[PASS] Issue #4 FP16 scale immunity + strict binary16 split fallback (320->960 exact 0.0000)")
 
 
 def test_downscale_fallback(gl: GLContext) -> None:
