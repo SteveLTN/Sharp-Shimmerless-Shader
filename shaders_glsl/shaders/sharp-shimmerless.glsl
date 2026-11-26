@@ -2,11 +2,10 @@
  * sharp-shimmerless
  * Author: zadpos
  * License: Public domain
- * 
+ *
  * A retro gaming shader for sharpest pixels with no aliasing/shimmering.
- * Instead of pixels as point samples, this shader considers pixels as
- * ideal rectangles forming a grid, and interpolates pixel by calculating
- * the surface area an input pixel would occupy on an output pixel.
+ * Evaluates the exact 2D area-averaged box filter analytically in a single
+ * hardware bilinear texture fetch with zero fragment divisions.
  */
 
 #if defined(VERTEX)
@@ -16,8 +15,8 @@
 #define COMPAT_ATTRIBUTE in
 #define COMPAT_TEXTURE texture
 #else
-#define COMPAT_VARYING varying 
-#define COMPAT_ATTRIBUTE attribute 
+#define COMPAT_VARYING varying
+#define COMPAT_ATTRIBUTE attribute
 #define COMPAT_TEXTURE texture2D
 #endif
 
@@ -27,8 +26,7 @@
 #define COMPAT_PRECISION
 #endif
 
-// Scale factors that fp16 can't store exactly misplace pixel edges (issue #4).
-// GL_FRAGMENT_PRECISION_HIGH is visible to both stages, so the uniform precisions match at link time.
+// Keep coordinate math and sampler highp when supported; mediump fallback otherwise.
 #if defined(GL_ES) && defined(GL_FRAGMENT_PRECISION_HIGH)
 #define SIZE_PRECISION highp
 #elif defined(GL_ES)
@@ -37,10 +35,27 @@
 #define SIZE_PRECISION
 #endif
 
+#if (defined(GL_ES) && !defined(GL_FRAGMENT_PRECISION_HIGH)) || defined(SHIMMERLESS_FORCE_SPLIT_FP16)
+#define USE_SPLIT_FP16 1
+#else
+#define USE_SPLIT_FP16 0
+#endif
+
 COMPAT_ATTRIBUTE vec4 VertexCoord;
 COMPAT_ATTRIBUTE vec4 COLOR;
 COMPAT_ATTRIBUTE vec4 TexCoord;
-COMPAT_VARYING vec2 pixel;
+COMPAT_VARYING SIZE_PRECISION vec2 pixel;
+COMPAT_VARYING SIZE_PRECISION vec2 invscale;
+COMPAT_VARYING COMPAT_PRECISION vec2 scale;
+COMPAT_VARYING SIZE_PRECISION vec2 invTextureSize;
+#if USE_SPLIT_FP16
+COMPAT_VARYING COMPAT_PRECISION vec2 scale_hi;
+COMPAT_VARYING COMPAT_PRECISION vec2 scale_mid;
+COMPAT_VARYING COMPAT_PRECISION vec2 scale_lo;
+COMPAT_VARYING COMPAT_PRECISION vec2 raw_scale_v;
+COMPAT_VARYING COMPAT_PRECISION vec2 half_in_v;
+COMPAT_VARYING COMPAT_PRECISION vec2 center_err_v;
+#endif
 
 uniform mat4 MVPMatrix;
 uniform COMPAT_PRECISION int FrameDirection;
@@ -52,7 +67,41 @@ uniform SIZE_PRECISION vec2 InputSize;
 void main()
 {
     gl_Position = MVPMatrix * VertexCoord;
-    pixel = TexCoord.xy * OutputSize * TextureSize / InputSize;
+#if defined(GL_ES)
+    highp vec2 out_hp = OutputSize;
+    highp vec2 in_hp = InputSize;
+    highp vec2 tex_hp = TextureSize;
+    highp vec2 raw_scale = out_hp / in_hp;
+    highp vec2 pixel_hp = TexCoord.xy * out_hp * tex_hp / in_hp;
+    invscale = in_hp / out_hp;
+    invTextureSize = vec2(1.0) / tex_hp;
+#else
+    vec2 out_hp = OutputSize;
+    vec2 in_hp = InputSize;
+    vec2 raw_scale = OutputSize / InputSize;
+    vec2 pixel_hp = TexCoord.xy * OutputSize * TextureSize / InputSize;
+    invscale = InputSize / OutputSize;
+    invTextureSize = vec2(1.0) / TextureSize;
+#endif
+    scale = max(raw_scale, vec2(1.0));
+#if USE_SPLIT_FP16
+    vec2 half_out = floor(0.5 * out_hp);
+    vec2 half_in = floor(0.5 * in_hp);
+    pixel = pixel_hp - half_out;
+    half_in_v = half_in;
+    center_err_v = half_out - half_in * raw_scale;
+
+    vec2 qstep = mix(vec2(8.0), vec2(4.0), step(vec2(8.0), raw_scale));
+    vec2 s_hi = floor(raw_scale * qstep) / qstep;
+    vec2 rem = raw_scale - s_hi;
+    vec2 s_mid = floor(rem * 8192.0 + 0.5) / 8192.0;
+    scale_hi = s_hi;
+    scale_mid = s_mid;
+    scale_lo = rem - s_mid;
+    raw_scale_v = raw_scale;
+#else
+    pixel = pixel_hp;
+#endif
 }
 
 #elif defined(FRAGMENT)
@@ -78,8 +127,6 @@ precision mediump float;
 #define COMPAT_PRECISION
 #endif
 
-// Scale factors that fp16 can't store exactly misplace pixel edges (issue #4).
-// GL_FRAGMENT_PRECISION_HIGH is visible to both stages, so the uniform precisions match at link time.
 #if defined(GL_ES) && defined(GL_FRAGMENT_PRECISION_HIGH)
 #define SIZE_PRECISION highp
 #elif defined(GL_ES)
@@ -88,42 +135,59 @@ precision mediump float;
 #define SIZE_PRECISION
 #endif
 
+#if (defined(GL_ES) && !defined(GL_FRAGMENT_PRECISION_HIGH)) || defined(SHIMMERLESS_FORCE_SPLIT_FP16)
+#define USE_SPLIT_FP16 1
+#else
+#define USE_SPLIT_FP16 0
+#endif
+
 uniform COMPAT_PRECISION int FrameDirection;
 uniform COMPAT_PRECISION int FrameCount;
 uniform SIZE_PRECISION vec2 OutputSize;
 uniform SIZE_PRECISION vec2 TextureSize;
 uniform SIZE_PRECISION vec2 InputSize;
-uniform sampler2D Texture;
-COMPAT_VARYING vec2 pixel;
+uniform SIZE_PRECISION sampler2D Texture;
+COMPAT_VARYING SIZE_PRECISION vec2 pixel;
+COMPAT_VARYING SIZE_PRECISION vec2 invscale;
+COMPAT_VARYING COMPAT_PRECISION vec2 scale;
+COMPAT_VARYING SIZE_PRECISION vec2 invTextureSize;
+#if USE_SPLIT_FP16
+COMPAT_VARYING COMPAT_PRECISION vec2 scale_hi;
+COMPAT_VARYING COMPAT_PRECISION vec2 scale_mid;
+COMPAT_VARYING COMPAT_PRECISION vec2 scale_lo;
+COMPAT_VARYING COMPAT_PRECISION vec2 raw_scale_v;
+COMPAT_VARYING COMPAT_PRECISION vec2 half_in_v;
+COMPAT_VARYING COMPAT_PRECISION vec2 center_err_v;
+#endif
 
 void main()
 {
-    // Measure both edges in source coordinates so texel selection and blending agree.
-#if defined(GL_ES) && !defined(GL_FRAGMENT_PRECISION_HIGH)
-    // pixel * InputSize can exceed the fp16 maximum (65504), so scale by a ratio instead.
-    // Its rounding error grows with distance from the anchor; anchoring at the center
-    // splits that drift evenly between opposite edges.
-    vec2 invscale = InputSize / OutputSize;
-    vec2 center_out = 0.5 * OutputSize;
-    vec2 center_in = 0.5 * InputSize;
-    vec2 pixel_tl = (floor(pixel) - center_out) * invscale + center_in;
-    vec2 pixel_br = (ceil(pixel) - center_out) * invscale + center_in;
+#if USE_SPLIT_FP16
+    COMPAT_PRECISION vec2 kc = floor(pixel);
+    COMPAT_PRECISION vec2 tx_c = (kc + center_err_v) * invscale;
+    COMPAT_PRECISION vec2 mc = floor(tx_c + 0.5);
+    COMPAT_PRECISION vec2 mc_hi = 16.0 * floor(mc * 0.0625);
+    COMPAT_PRECISION vec2 mc_lo = mc - mc_hi;
+    COMPAT_PRECISION vec2 d = ((((kc - mc_hi * scale_hi) - mc_lo * scale_hi) - mc_hi * scale_mid) - mc_lo * scale_mid) + (0.5 + center_err_v) - mc * scale_lo;
+    COMPAT_PRECISION vec2 half_s = 0.5 * raw_scale_v;
+    COMPAT_PRECISION vec2 adj = step(half_s, d) - step(d, -half_s);
+    mc += adj;
+    d -= adj * raw_scale_v;
+    COMPAT_PRECISION vec2 m = mc + half_in_v;
+    COMPAT_PRECISION vec2 w = clamp(d + 0.5, 0.0, 1.0);
+    COMPAT_PRECISION vec2 uv_up = m * invTextureSize + (w - 0.5) * invTextureSize;
+    COMPAT_PRECISION vec2 uv_dn = (half_in_v + tx_c + 0.5 * invscale) * invTextureSize;
+    COMPAT_PRECISION vec2 uv = mix(uv_dn, uv_up, step(vec2(1.0), raw_scale_v));
+    uv = clamp(uv, vec2(0.5) * invTextureSize, (InputSize - vec2(0.5)) * invTextureSize);
+    FragColor = vec4(COMPAT_TEXTURE(Texture, uv).rgb, 1.0);
 #else
-    // Multiplying before dividing keeps the rounding error from growing across the screen.
-    vec2 pixel_tl = floor(pixel) * InputSize / OutputSize;
-    vec2 pixel_br = ceil(pixel) * InputSize / OutputSize;
-#endif
-    vec2 texel_tl = floor(pixel_tl);
-    vec2 texel_br = floor(pixel_br);
-
-    vec2 same_texel = step(texel_br, texel_tl);
-    // Avoid dividing by zero if the two edges round to the same coordinate.
-    vec2 width = mix(pixel_br - pixel_tl, vec2(1.0), same_texel);
-    vec2 weight_br = mix(fract(pixel_br) / width, vec2(1.0), same_texel);
-    vec2 mod_texel = texel_br - 0.5 + weight_br;
+    // Snap to exact output pixel centers to eliminate hardware barycentric interpolation jitter.
+    SIZE_PRECISION vec2 texel = (floor(pixel) + 0.5) * invscale;
+    SIZE_PRECISION vec2 m = floor(texel + 0.5);
+    COMPAT_PRECISION vec2 w = clamp((texel - m) * scale + 0.5, 0.0, 1.0);
     // Keep the far edge from blending in texels outside the game image.
-    mod_texel = clamp(mod_texel, vec2(0.5), InputSize - vec2(0.5));
-
-    FragColor = vec4(COMPAT_TEXTURE(Texture, mod_texel / TextureSize).rgb, 1.0);
-} 
+    SIZE_PRECISION vec2 u = clamp(m - 0.5 + w, vec2(0.5), InputSize - vec2(0.5));
+    FragColor = vec4(COMPAT_TEXTURE(Texture, u * invTextureSize).rgb, 1.0);
+#endif
+}
 #endif

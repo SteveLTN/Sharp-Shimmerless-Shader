@@ -48,6 +48,39 @@ It interpolates pixels based on how much area an input pixel would occupy on an 
 
 Hence, it achieves both minimal number of interpolated pixels and ideal anti aliasing, i.e. **NO SHIMMERING**!
 
+## Presets
+
+Both **Slang** (`shaders_slang/`) and **GLSL** (`shaders_glsl/`) ship the same **three primary presets** powered by a shared zero-division analytical core:
+
+### Which Preset Should I Use?
+
+1. **Pick your folder by RetroArch video driver:**
+   * **`shaders_slang/`** *(preferred)* — for **Vulkan, Metal, D3D11/12, or GLCore** (`glcore`). Filterable half-float FBOs are guaranteed.
+   * **`shaders_glsl/`** — for RetroArch's legacy **`gl`** (OpenGL 2.1 / GLES 2.0–3.0) driver on Linux handhelds.
+2. **Pick your preset by screen & device:**
+
+| Your Screen / Setup | Recommended Preset | Passes | Why |
+| :--- | :--- | :---: | :--- |
+| **640×480 handhelds** *(RG35XX, Miyoo Mini+, R36S)* & **general displays** | **`sharp-shimmerless`** *(default — try this first)* | 2 | Linear-light exact box filter: sharpest rectangular pixels with zero geometric or brightness shimmering. |
+| **High-PPI displays** *(1024×768 TrimUI Brick / Pro, 720p, 1080p, 4K)* | **`sharp-shimmerless-smooth-hq`** | 2 | Linear-light $C^1$ band-limited Tent filter (Hann selectable) for ultra-smooth scrolling; auto-snaps exact integer axes (e.g., 256 px → 1024 px = 4×) and scales $< 2\times$ back to sharp Box. |
+| **Legacy `gl` drivers without float FBOs** *(or max battery/speed)* | **`sharp-shimmerless-fast-fallback`** | 1 | Zero-division 1-pass sRGB box filter. Works on every GL/GLES 2.0 device without needing a float FBO (trades linear-light edge brightness for maximum compatibility). |
+
+> **Seeing a solid magenta screen?**
+> Your RetroArch `gl` driver silently fell back from `float_framebuffer` to an 8-bit `RGBA8` intermediate (which would otherwise crush dark shadows `0–11/255` to pure black). The 2-pass presets detect this via an alpha canary and show solid magenta on purpose — either switch RetroArch's video driver to **`glcore`** or **`vulkan`** (and use `shaders_slang/`), or load **`shaders_glsl/sharp-shimmerless-fast-fallback.glslp`**.
+
+*(For existing saved configs, `shaders_glsl/sharp-shimmerless-gammacorrected.glslp` is kept as a compatibility preset pointing to the 2-pass exact-sRGB pipeline.)*
+
+### Tunable Shader Parameters (RetroArch Menu)
+
+All three presets share the same core and can be fine-tuned live under **Quick Menu → Shaders → Shader Parameters**:
+
+* **`GAMMA_MODE` / `GAMMA_OUT`** — Default is fast $\gamma = 2.0$ (`c * c` / `sqrt`, ~95% of exact sRGB at minimal GPU cost). Set `GAMMA_MODE = 1` and `GAMMA_OUT = 2` for exact piecewise sRGB EOTF/OETF.
+* **`FILTER_MODE`** — `0` = Box (sharpest), `1` = Tent ($C^1$, -26 dB sidelobes, default on `-smooth-hq`), `2` = Raised-Cosine / Hann (-31.5 dB sidelobes).
+* **`SNAP_INT_AXES`** — `1` (default) keeps exact integer axes (like 4× horizontal on NES/SNES at 1024×768) razor-sharp in Box mode even when using `-smooth-hq`.
+
+### Color Correction (GBA / GBC)
+Core-side color correction (mGBA, Gambatte, SameBoy) outputs standard sRGB prior to shader execution and works seamlessly with all presets. If using shader-side color correction (`gba-color` / `gbc-color`), prepend it at `1x source` *before* `sharp-shimmerless-linearize` rather than after scaling.
+
 ### Curvature Shaders
 Applies CRT-like curvature.
 `-curvature-grid` and `curvature-scanlines` versions combines curvature and grid/scanline effects.
@@ -61,8 +94,3 @@ Applies grid or scanline effect.
 It supports subpixel rendering by offsetting positions of output pixels per each color.
 
 Subpixel shaders need to sample input pixels three times per output pixel, and this could make them significantly slower than the basic shader.
-
-### Gamma Corrected Shader
-This is the ideal way, but it requires four texture sampling per output pixel, making it slow.
-
-All other versions leverage OpenGL bilinear filtering to interpolate colors in linear space in a single texture sampling.
