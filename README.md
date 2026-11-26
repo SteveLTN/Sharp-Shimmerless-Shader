@@ -33,10 +33,10 @@ On older OpenGL ES devices using RetroArch's legacy **`gl`** driver, use only **
 
 ## Set Up with an AI Agent
 
-Paste this into your coding or deployment agent, replacing the device details:
+Paste this into your coding or deployment agent:
 
 ```text
-Read https://github.com/SteveLTN/Sharp-Shimmerless-Shader/blob/main/RETROARCH-HANDHELD-AGENT-GUIDE.md and help me configure Sharp-Shimmerless on my <device, OS, and RetroArch version>. Explain the available shader presets and recommend the best one for my device and video driver. Start read-only, and get my approval before installing files or changing the configuration.
+Read https://github.com/SteveLTN/Sharp-Shimmerless-Shader/blob/main/RETROARCH-HANDHELD-AGENT-GUIDE.md and set up Sharp-Shimmerless on my RetroArch device. Discover the device, operating system, RetroArch installation, video driver, and available control methods. Explain the shader presets and recommend the best option for my device. Start read-only, and get my approval before changing files, configuration, or video drivers.
 ```
 
 ## Existing Solutions and Their Limitations

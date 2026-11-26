@@ -6,6 +6,22 @@ This guide is for AI agents and humans installing or updating Sharp-Shimmerless 
 
 Platform-specific behavior lives in separate [quirks references](#platform-specific-quirks), which provide verified examples rather than universal layouts.
 
+## Getting started from the README prompt
+
+The owner may provide only the README prompt, without a device name, OS version, RetroArch version, IP address, or connection method. Do not require the owner to fill in a template.
+
+Begin read-only by discovering what is accessible from your environment:
+
+- Determine whether RetroArch is installed on the local computer.
+- Look for already-connected devices and available device-control tools.
+- Check for existing, authenticated remote access without guessing credentials.
+- Identify attached removable storage only when direct card access is being used.
+- Once device access is available, identify the hardware, OS and version, RetroArch version and capabilities, active video driver, display resolution, frontend, launch chain, and persistent storage.
+
+Use an available safe control method rather than assuming SSH. If no device is accessible, briefly explain the supported connection options and ask the owner which one to use. Ask only for access information that cannot be discovered; never guess passwords or expose credentials.
+
+Explain the available presets and recommend one based on the discovered hardware, display, driver, and performance constraints. Obtain approval before installing files or changing configuration.
+
 ## Non-negotiable safety rules
 
 - Start read-only. Identify the OS, RetroArch version/features, active processes, mounts, free space, existing driver, shader selection, and launch mechanism before changing anything.
@@ -90,29 +106,42 @@ When updating files without changing preset names or paths, normally only the sh
 
 ## Controlling the device with an agent
 
-### SSH/SCP/SFTP: preferred for a running device
+Choose from the methods available in the current environment. SSH is one option, not a prerequisite.
 
-Use the account and authentication method supplied by the owner. Do not assume `root` on every distribution and do not guess passwords.
+### Local RetroArch installation
 
-```sh
-ssh <ssh-user>@<device-host>
-scp <local-file> <ssh-user>@<device-host>:<remote-staging-directory>/
-```
+When the agent is running on the same computer as RetroArch, inspect the local installation, process state, configuration, overrides, and shader directories directly. Account for distribution-specific packaging such as Flatpak, Snap, or portable installations. Do not assume that all RetroArch setups use the same configuration path.
 
-An mDNS name may be preferable to a changing DHCP address when it works. VPN fake-IP DNS can interfere with bare hostnames or `.local`; use the confirmed LAN address rather than modifying VPN settings without approval.
+### Existing device-control or remote-access tools
 
-Use SSH to inspect the device, upload a staging archive, verify checksums, and update configuration while RetroArch is closed. Avoid launching, stopping, or restarting a game merely to automate validation; ask the owner to perform the final visual test.
+Use an already-available device-control tool, authenticated remote shell, or platform integration when appropriate. Do not install a remote agent, enable a new remote-access service, or weaken device security without the owner's approval.
 
-### Direct card editing: preferred for offline maintenance
+For Android devices, an existing authorized ADB connection may provide shell and file access. Confirm package names, application-specific storage, and Android storage restrictions before modifying files.
+
+### SSH/SCP/SFTP
+
+Use SSH for a network-accessible device when credentials or an authenticated connection already exist. Use the account supplied or confirmed by the owner; do not assume `root` or guess passwords.
+
+SSH supports read-only discovery, staged uploads, checksum verification, and configuration updates. An mDNS name may work, but use the confirmed LAN address if name resolution is unreliable. Do not change VPN or network settings without approval.
+
+### Direct card editing
+
+For offline maintenance:
 
 1. Shut down the handheld cleanly before removing storage.
-2. Identify partitions by labels, filesystems, and contents—not by slot number alone.
+2. Identify partitions by labels, filesystems, and contents—not slot numbers.
 3. Back up every file being replaced.
-4. Replace the shader tree using a staging directory on the destination filesystem and checksum verification.
-5. If the frontend configuration is on another partition or card, mount that location and translate its on-device paths carefully.
-6. Preserve permissions where applicable, safely eject the media, and request a visual launch test.
+4. Stage the replacement and verify checksums.
+5. Locate frontend configuration, which may reside on another partition.
+6. Preserve permissions where applicable and safely eject the media.
 
-exFAT game cards are usually straightforward to edit on a desktop. Linux ext4 configuration partitions may require additional OS support. Do not modify a boot partition unless the installation specifically requires it.
+Direct card access may not reveal the installed RetroArch version, runtime driver support, or active processes. Record those details as unknown until they can be verified on the device.
+
+### Shared folders and other file-only access
+
+A mounted network share or synchronized folder can be used to copy shader files when it exposes the correct RetroArch directories. File-only access cannot establish the complete runtime configuration or prove rendering compatibility. Use it only when the destination and persistence are clear, and leave runtime inspection and visual validation as explicit follow-ups.
+
+Regardless of the method, start read-only, back up replaced files, verify checksums, preserve persistent configuration, and request an on-device visual test before declaring success.
 
 ## Safe deployment workflow
 
