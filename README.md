@@ -3,6 +3,42 @@
 ## A Sharp, Shimmering-free Shader for RetroArch
 The Sharp-Shimmerless shader is a shader which guarantees minimum number of interpolated pixels, i.e., the sharpest rectangular pixels possible, while inducing NO aliasing/shimmering.
 
+## Acknowledgements
+
+This repository is a fork of [zadpos/Sharp-Shimmerless-Shader](https://github.com/zadpos/Sharp-Shimmerless-Shader). Hats off to the original author and contributors for creating the box-filter approach that makes sharp, shimmering-free scaling possible.
+
+## Improvements in This Fork
+
+This fork builds on the original shader with additional correctness fixes, handheld compatibility work, and new quality/performance options:
+
+- Fixed horizontal RGB/BGR subpixel sampling offsets.
+- Improved box-filter overlap calculations by working in source coordinates.
+- Fixed edge accuracy and out-of-range sampling on OpenGL ES devices with limited fragment-shader precision.
+- Avoided FP16 overflow on devices without `highp` fragment support, reducing graphical artifacts on low-power handheld GPUs.
+- Added an analytical single-tap filtering core shared by the GLSL and Slang implementations.
+- Added two-pass linear-light presets for more accurate brightness across filtered edges.
+- Added a smooth, high-quality preset with Tent and selectable Hann filtering, while preserving sharp integer-scaled axes.
+- Added a single-pass fast fallback for older GL/GLES devices.
+- Added explicit detection of unsupported 8-bit framebuffer fallback. The two-pass presets display magenta rather than silently producing crushed shadows and incorrect brightness.
+
+## Compatibility and Performance Costs
+
+The additional quality and compatibility come with different costs depending on the preset:
+
+- **`sharp-shimmerless` and `sharp-shimmerless-smooth-hq`** use two passes and require filterable floating-point framebuffers. They consume more GPU time and memory bandwidth than a simple single-pass shader, and are intended for drivers with reliable floating-point render-target support, such as `glcore`, Vulkan, Metal, or D3D11/12.
+- **`sharp-shimmerless-smooth-hq`** favors smoother scrolling and reduced filtering artifacts over the absolute sharpest possible transitions.
+- **`sharp-shimmerless-fast-fallback`** uses one pass and does not require a floating-point framebuffer. It is the compatibility and performance option, but filters in sRGB space rather than linear light. Consequently, edge brightness and dark gradients are less accurate than with the two-pass presets.
+
+On older OpenGL ES devices using RetroArch's legacy **`gl`** driver, use only **`shaders_glsl/sharp-shimmerless-fast-fallback.glslp`**. The two-pass presets are not dependable on these drivers because RetroArch may lack or silently replace the required floating-point framebuffer. If a two-pass preset displays a solid magenta image, switch to the fast fallback or use a supported modern driver instead.
+
+## Set Up with an AI Agent
+
+Paste this into your coding or deployment agent, replacing the device details:
+
+```text
+Read https://github.com/SteveLTN/Sharp-Shimmerless-Shader/blob/main/RETROARCH-HANDHELD-AGENT-GUIDE.md and help me configure Sharp-Shimmerless on my <device, OS, and RetroArch version>. Explain the available shader presets and recommend the best one for my device and video driver. Start read-only, and get my approval before installing files or changing the configuration.
+```
+
 ## Existing Solutions and Their Limitations
 There already exist some attempts at achieving both sharp pixels and anti-aliasing, one of them being [sharp-bilinear shaders](https://github.com/rsn8887/Sharp-Bilinear-Shaders).
 While they produce reasonably good image on modern high resolution screens, they fall apart on low-resolution screens often found in open-source handhelds.

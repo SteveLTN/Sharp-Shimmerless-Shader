@@ -1,0 +1,151 @@
+# Agent Guide: RetroArch Handheld Deployment
+
+This guide is part of [SteveLTN/Sharp-Shimmerless-Shader](https://github.com/SteveLTN/Sharp-Shimmerless-Shader). Use the shader sources and presets from that repository, and follow this guide to recommend, install, and configure them. For Rocknix devices, also read [the Rocknix quirks guide](https://github.com/SteveLTN/Sharp-Shimmerless-Shader/blob/main/ROCKNIX-QUIRKS.md).
+
+This guide is for AI agents and humans installing or updating Sharp-Shimmerless on RetroArch handhelds and similar embedded devices. It is operating-system agnostic: discover the device's actual layout instead of assuming Rocknix paths, card numbering, account names, or configuration mechanisms.
+
+Platform-specific behavior lives in separate [quirks references](#platform-specific-quirks), which provide verified examples rather than universal layouts.
+
+## Non-negotiable safety rules
+
+- Start read-only. Identify the OS, RetroArch version/features, active processes, mounts, free space, existing driver, shader selection, and launch mechanism before changing anything.
+- Never kill or close an active game without the owner's approval. Check for both `retroarch` and `retroarch32` with `pgrep -x` where available; a broad `ps | grep` can match the inspection command itself.
+- Back up the live shader directory and every configuration file before editing it. Device configuration can contain Wi-Fi credentials, passwords, and personal data. Do not print whole configuration files, commit them, or include secrets in reports. Keep backups restrictive.
+- Stage uploads and verify checksums before replacing the live directory. Keep the backup until the visual launch test succeeds.
+- Determine whether the frontend generates RetroArch configuration at launch. Do not edit a generated temporary config as though it were persistent.
+- Do not reboot, restart the frontend, change the video driver, or select the compatibility fallback without the owner's approval when those actions exceed the requested work.
+- Do not claim driver compatibility from file checks, shader compilation, or GPU feature detection alone. The final test is a normal game image on the device, not a black or magenta screen.
+
+## Choose the correct shader variant
+
+Select the shader language from RetroArch's active video driver:
+
+| RetroArch video driver | Shader directory | Notes |
+| --- | --- | --- |
+| `vulkan` | `shaders_slang/` | Preferred where the device and core work correctly with Vulkan. |
+| `glcore` | `shaders_slang/` | Use Slang rather than the legacy GLSL presets. |
+| `metal`, `d3d11`, `d3d12` | `shaders_slang/` | Relevant to non-Linux RetroArch systems using the same shader package. |
+| `gl` / OpenGL ES | `shaders_glsl/` | Legacy GLSL path. Two-pass presets require a working filterable float framebuffer. |
+
+Then select the filtering preset:
+
+| Preset | Passes | Intended use |
+| --- | ---: | --- |
+| `sharp-shimmerless` | 2 | Standard exact Box filter and the default for 640×480/general displays. |
+| `sharp-shimmerless-smooth-hq` | 2 | Higher-quality Tent filter for high-PPI displays; not the requested standard variant unless explicitly selected. |
+| `sharp-shimmerless-fast-fallback` | 1 | Compatibility/performance path that avoids the floating-point intermediate. |
+
+The two-pass presets set `float_framebuffer0 = true`. On legacy `gl`, RetroArch may silently substitute an 8-bit UNORM intermediate. The shader detects this with an alpha canary and intentionally displays solid magenta rather than crushing dark colors.
+
+A magenta screen means the current driver/FBO path is incompatible with the two-pass preset. It does not identify a defective shader file. Confirm the driver and logs, then ask the owner before switching to Slang with another driver or choosing the one-pass fallback.
+
+## Discover the device before deployment
+
+Do not assume that `retroarch.cfg` is the only or authoritative configuration. Frontends can combine a base config, core/content overrides, generated append configs, and command-line options.
+
+Record:
+
+1. **OS and hardware:** OS release, architecture, SoC/GPU, and available RAM/storage.
+2. **RetroArch capabilities:** video drivers and shader backends compiled into the installed binary.
+3. **Active configuration:** current `video_driver`, shader directory, selected preset, and any per-core/per-game overrides.
+4. **Launch chain:** how the frontend starts RetroArch and whether it regenerates configuration or adds `--set-shader`.
+5. **Storage:** which mounts are read/write, which removable card contains games/shaders, and where configuration persists.
+6. **Runtime state:** whether RetroArch is running and whether a visual test can be performed safely.
+
+Useful commands when available over SSH:
+
+```sh
+cat /etc/os-release
+uname -a
+retroarch --version
+retroarch --features
+pgrep -a -x retroarch || true
+pgrep -a -x retroarch32 || true
+df -h
+cat /proc/mounts
+```
+
+For Vulkan devices, `vulkaninfo --summary` can confirm that a real driver and physical device are visible. This proves availability, not that the complete RetroArch/core/shader combination will render correctly.
+
+Inspect only relevant configuration keys, for example:
+
+```sh
+grep '^video_driver = ' <retroarch-config>
+grep -E 'shaderset|shader' <frontend-settings>
+```
+
+Do not dump an entire frontend configuration file into terminal output or an agent transcript.
+
+## Persistent installation model
+
+A generic installation has up to three layers:
+
+1. **Shader tree:** the persistent `shaders_glsl/` and `shaders_slang/` directories. Place them somewhere RetroArch can read after every reboot.
+2. **Selected preset:** the `.glslp` or `.slangp` chosen in RetroArch or by the frontend.
+3. **Frontend integration (optional):** a reference preset, menu registration, generated config, or launch argument used by the device's OS.
+
+A normal RetroArch installation can load a preset directly from the persistent shader tree. A frontend-managed device may instead require a small reference preset in its own shader directory. Reference indirection is frontend-specific; do not assume every RetroArch distribution needs it.
+
+When updating files without changing preset names or paths, normally only the shader tree needs replacement. Driver changes, preset selection changes, and frontend menu changes require separate persistent configuration updates.
+
+## Controlling the device with an agent
+
+### SSH/SCP/SFTP: preferred for a running device
+
+Use the account and authentication method supplied by the owner. Do not assume `root` on every distribution and do not guess passwords.
+
+```sh
+ssh <ssh-user>@<device-host>
+scp <local-file> <ssh-user>@<device-host>:<remote-staging-directory>/
+```
+
+An mDNS name may be preferable to a changing DHCP address when it works. VPN fake-IP DNS can interfere with bare hostnames or `.local`; use the confirmed LAN address rather than modifying VPN settings without approval.
+
+Use SSH to inspect the device, upload a staging archive, verify checksums, and update configuration while RetroArch is closed. Avoid launching, stopping, or restarting a game merely to automate validation; ask the owner to perform the final visual test.
+
+### Direct card editing: preferred for offline maintenance
+
+1. Shut down the handheld cleanly before removing storage.
+2. Identify partitions by labels, filesystems, and contents—not by slot number alone.
+3. Back up every file being replaced.
+4. Replace the shader tree using a staging directory on the destination filesystem and checksum verification.
+5. If the frontend configuration is on another partition or card, mount that location and translate its on-device paths carefully.
+6. Preserve permissions where applicable, safely eject the media, and request a visual launch test.
+
+exFAT game cards are usually straightforward to edit on a desktop. Linux ext4 configuration partitions may require additional OS support. Do not modify a boot partition unless the installation specifically requires it.
+
+## Safe deployment workflow
+
+1. **Validate the source.** From the repository root, run:
+
+   ```sh
+   python3 tests/verify_shaders.py
+   ```
+
+   This is a standalone GPU verification script, not a `unittest` suite; `python3 -m unittest discover` does not run it.
+
+2. **Inspect the target.** Record the discovery information above and confirm that RetroArch is closed before replacing live configuration.
+
+3. **Back up.** Use a timestamped backup outside the upload staging directory. Include the current shader tree, selected presets/reference files, RetroArch configuration, and frontend settings that will change.
+
+4. **Stage on the destination filesystem.** Upload `shaders_glsl`, `shaders_slang`, `README.md`, and `LICENSE.txt` without touching the live tree. Generate a SHA-256 manifest from the source files.
+
+5. **Verify before swapping.** Check every staged checksum, the selected preset's pass count, and every referenced shader path.
+
+6. **Replace with rollback ready.** Move the live directory aside, move staging into place, and verify again. Restore the old directory immediately if verification fails. Remove temporary files only after the live copy passes.
+
+7. **Update persistent settings as one pipeline.** Keep the video driver, shader language, preset filename, frontend menu filter, and launch-time override behavior consistent.
+
+8. **Verify configuration without exposing secrets.** Check only relevant keys, preset/reference paths, and checksums. Do not assume a running frontend has reloaded environment variables or menu lists.
+
+9. **Request a visual test.** Ask the owner to launch a suitable game normally. A normal image is required before declaring success. Note any one-time shader compilation delay, persistent performance problem, black screen, or magenta canary.
+
+10. **Report the result.** List changed paths, backup location, test/checksum results, and remaining runtime uncertainty. Do not commit device configuration, credentials, logs, or backups to this repository.
+
+## Platform-specific quirks
+
+Keep OS-, frontend-, and hardware-specific behavior out of this generic workflow. Consult the relevant quirks reference after discovering the target platform, and add new references as separate files so they can grow independently.
+
+- [Rocknix quirks](ROCKNIX-QUIRKS.md): currently documents the verified RK3326 storage layout, legacy `gl` limitation, launch-time configuration generation, boot-time vendor overrides, and persistent custom-autostart workaround.
+
+A quirks reference should identify the exact OS version and hardware tested, provide mount/configuration evidence, distinguish direct edits from boot-persistent settings, and record whether runtime rendering was visually verified.
