@@ -1,0 +1,9 @@
+shaders = 1
+
+shader0 = shaders/sharp-shimmerless-2-8bfbo-safe.glsl
+filter_linear0 = false
+
+parameters = "FILTER_MODE;GAMMA_MODE;SNAP_INT_AXES"
+FILTER_MODE = "0.000000"
+GAMMA_MODE = "1.000000"
+SNAP_INT_AXES = "1.000000"

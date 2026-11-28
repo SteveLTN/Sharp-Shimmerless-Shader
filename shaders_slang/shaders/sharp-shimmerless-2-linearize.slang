@@ -1,11 +1,11 @@
 #version 450
 
 /*
- * sharp-shimmerless-linearize
+ * sharp-shimmerless-2-linearize
  * License: Public domain
  *
  * Pass 0 (1x source resolution): converts gamma-encoded RGB input into linear light
- * for hardware-accelerated bilinear blending in sharp-shimmerless-core.
+ * for hardware-accelerated bilinear blending in sharp-shimmerless-2-core.
  */
 
 #pragma parameter GAMMA_MODE "Gamma Curve (0=Fast 2.0, 1=Exact sRGB)" 0.0 0.0 1.0 1.0

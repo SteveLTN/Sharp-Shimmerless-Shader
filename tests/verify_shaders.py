@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""GPU-rendered verification suite for Sharp-Shimmerless GLSL & Slang shaders.
+"""GPU-rendered verification suite for Sharp-Shimmerless-2 GLSL & Slang shaders.
 
 Runs real offscreen OpenGL 2.1 (GLSL 120) renders on macOS via ctypes + OpenGL.framework,
-testing both 1-pass and 2-pass (GL_RGBA16F) pipelines without third-party dependencies.
+testing 1-pass (sRGB and 8-bit-FBO-safe linear-light) and 2-pass (GL_RGBA16F) pipelines
+without third-party dependencies.
 """
 
 from __future__ import annotations
 
 import ctypes as c
 from fractions import Fraction
-from math import ceil, cos, floor, pi
+from math import ceil, floor, pi, sin
 from pathlib import Path
 import re
 from struct import pack, unpack
@@ -44,6 +45,18 @@ GL_VERSION = 0x1F02
 
 U, I, V, S, F, B = c.c_uint, c.c_int, c.c_void_p, c.c_char_p, c.c_float, c.c_ubyte
 P = c.POINTER
+
+EXTRA_GLSL_VARIANTS = [
+    "curvature",
+    "curvature-grid",
+    "curvature-scanlines",
+    "grid",
+    "scanlines",
+    "subpixel-bgr",
+    "subpixel-rgb",
+    "subpixel-vbgr",
+    "subpixel-vrgb",
+]
 
 
 class GLContext:
@@ -282,6 +295,54 @@ def srgb_to_linear(v: float) -> float:
     return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
 
 
+def linear_to_srgb(v: float) -> float:
+    v = max(v, 0.0)
+    return v * 12.92 if v <= 0.0031308 else 1.055 * (v ** (1.0 / 2.4)) - 0.055
+
+
+def exact_linear_reference_2d(
+    in_rgba: bytes, w_in: int, h_in: int, w_tex: int, w_out: int, h_out: int, filter_mode: float, gamma_mode: float
+) -> list[tuple[float, float, float]]:
+    def axis_1d(n: int, m: int):
+        raw_scale = m / n
+        scale = max(raw_scale, 1.0)
+        use_smooth = (raw_scale >= 1.999) and (abs(raw_scale - floor(raw_scale + 0.5)) > 0.001)
+        res = []
+        for k in range(m):
+            texel = (k + 0.5) * (n / m)
+            b = floor(texel + 0.5)
+            d = (texel - b) * scale
+            w = min(1.0, max(0.0, d + 0.5))
+            if filter_mode > 0.5 and use_smooth:
+                ds = min(1.0, max(-1.0, d))
+                if filter_mode < 1.5:
+                    w = 0.5 + ds - 0.5 * ds * abs(ds)
+                else:
+                    w = 0.0 if abs(d) >= 1.0 and d < 0 else (1.0 if abs(d) >= 1.0 else 0.5 * (1.0 + ds + sin(pi * ds) / pi))
+            res.append((min(n - 1, max(0, b - 1)), min(n - 1, max(0, b)), w))
+        return res
+
+    to_lin = (lambda v: v * v) if gamma_mode < 1.5 else srgb_to_linear
+    from_lin = (lambda v: max(v, 0.0) ** 0.5) if gamma_mode < 1.5 else linear_to_srgb
+    lin_lut = [to_lin(i / 255.0) for i in range(256)]
+    ax_x = axis_1d(w_in, w_out)
+    ax_y = axis_1d(h_in, h_out)
+    out = []
+    for iy0, iy1, wy in ax_y:
+        for ix0, ix1, wx in ax_x:
+            o00 = 4 * (iy0 * w_tex + ix0)
+            o10 = 4 * (iy0 * w_tex + ix1)
+            o01 = 4 * (iy1 * w_tex + ix0)
+            o11 = 4 * (iy1 * w_tex + ix1)
+            rgb = []
+            for ch in range(3):
+                c0 = lin_lut[in_rgba[o00 + ch]] * (1.0 - wx) + lin_lut[in_rgba[o10 + ch]] * wx
+                c1 = lin_lut[in_rgba[o01 + ch]] * (1.0 - wx) + lin_lut[in_rgba[o11 + ch]] * wx
+                rgb.append(from_lin(c0 * (1.0 - wy) + c1 * wy) * 255.0)
+            out.append((rgb[0], rgb[1], rgb[2]))
+    return out
+
+
 def float16_round(x: float) -> float:
     return unpack("e", pack("e", x))[0]
 
@@ -292,7 +353,6 @@ def make_pattern_rgba(w_in: int, h_in: int, w_tex: int, h_tex: int, pad_rgb=(255
         for x in range(w_tex):
             off = 4 * (y * w_tex + x)
             if x < w_in and y < h_in:
-                # High-contrast pattern mixing stripes, checkerboard, and smooth ramp
                 r = 255 if ((x + y) % 2 == 0) else 0
                 g = 255 if (x % 3 == 0) else 40
                 b = (x * 13 + y * 29) % 256
@@ -346,63 +406,92 @@ def parse_preset(path: Path) -> dict[str, str]:
     return data
 
 
-def test_presets_and_structure() -> None:
-    expected_glsl_presets = [
-        ("shaders_glsl/sharp-shimmerless.glslp", 2),
-        ("shaders_glsl/sharp-shimmerless-smooth-hq.glslp", 2),
-        ("shaders_glsl/sharp-shimmerless-fast-fallback.glslp", 1),
-        ("shaders_glsl/sharp-shimmerless-gammacorrected.glslp", 2),
-    ]
-    expected_slang_presets = [
-        ("shaders_slang/sharp-shimmerless.slangp", 2),
-        ("shaders_slang/sharp-shimmerless-smooth-hq.slangp", 2),
-        ("shaders_slang/sharp-shimmerless-fast-fallback.slangp", 1),
-    ]
-    for retired in [
-        "shaders_glsl/sharp-shimmerless-gamma.glslp",
-        "shaders_glsl/sharp-shimmerless-fast.glslp",
-        "shaders_slang/sharp-shimmerless-fast.slangp",
-    ]:
-        assert not (ROOT / retired).exists(), f"Retired duplicate preset still exists: {retired}"
-    for rel, expected_passes in expected_glsl_presets + expected_slang_presets:
-        p = ROOT / rel
-        assert p.exists(), f"Missing preset: {rel}"
-        cfg = parse_preset(p)
-        n = int(cfg["shaders"])
-        assert n == expected_passes, f"{rel}: expected {expected_passes} pass(es), got {n}"
-        declared_params: set[str] = set()
-        for i in range(n):
-            sp = (p.parent / cfg[f"shader{i}"]).resolve()
-            assert sp.exists(), f"{rel} references missing shader{i}: {cfg[f'shader{i}']}"
-            src = sp.read_text()
-            declared_params.update(re.findall(r"#pragma\s+parameter\s+(\w+)", src))
-        if "parameters" in cfg and cfg["parameters"]:
-            for pname in cfg["parameters"].split(";"):
-                pname = pname.strip()
-                assert pname in declared_params, f"{rel} sets undeclared parameter {pname}"
-                assert pname in cfg, f"{rel} lists {pname} in parameters without a value"
-        if n == 2:
-            assert cfg.get("scale_type0") == "source", f"{rel}: pass 0 must use scale_type0 = source"
-            assert float(cfg.get("scale0", "0")) == 1.0, f"{rel}: pass 0 must use scale0 = 1.0"
-            assert cfg.get("float_framebuffer0") == "true", f"{rel}: pass 0 must enable float_framebuffer0"
-            assert cfg.get("filter_linear1") == "true", f"{rel}: pass 1 must enable filter_linear1"
-        else:
-            assert cfg.get("filter_linear0") == "true", f"{rel}: 1-pass preset must enable filter_linear0"
+def max_rgb_diff(a: bytes, b: bytes) -> int:
+    assert len(a) == len(b)
+    return max(
+        max(abs(a[i] - b[i]), abs(a[i + 1] - b[i + 1]), abs(a[i + 2] - b[i + 2]))
+        for i in range(0, len(a), 4)
+    )
 
-    # GLES defaults unqualified sampler2D to lowp; verify explicit SIZE_PRECISION on all GLSL shaders.
-    for rel in [
-        "shaders_glsl/shaders/sharp-shimmerless-linearize.glsl",
-        "shaders_glsl/shaders/sharp-shimmerless-core.glsl",
-        "shaders_glsl/shaders/sharp-shimmerless.glsl",
-    ]:
+
+def test_presets_and_structure() -> None:
+    preset_specs = [
+        ("sharp-shimmerless-2-gamma-modern", 2, None),
+        ("sharp-shimmerless-2-gamma-8bfbo-safe", 1, "false"),
+        ("sharp-shimmerless-2-non-gamma-fast", 1, "true"),
+        ("sharp-shimmerless-2-gamma-modern-hq", 2, None),
+    ]
+    expected_stems = {stem for stem, _, _ in preset_specs}
+
+    for folder, ext in [("shaders_glsl", "glslp"), ("shaders_slang", "slangp")]:
+        top_presets = {p.stem for p in (ROOT / folder).glob(f"*.{ext}")}
+        assert top_presets == expected_stems, f"{folder}: expected top-level presets {sorted(expected_stems)}, got {sorted(top_presets)}"
+
+        for stem, expected_passes, expected_filter0 in preset_specs:
+            rel = f"{folder}/{stem}.{ext}"
+            p = ROOT / rel
+            cfg = parse_preset(p)
+            n = int(cfg["shaders"])
+            assert n == expected_passes, f"{rel}: expected {expected_passes} pass(es), got {n}"
+            declared_params: set[str] = set()
+            for i in range(n):
+                sp = (p.parent / cfg[f"shader{i}"]).resolve()
+                assert sp.exists(), f"{rel} references missing shader{i}: {cfg[f'shader{i}']}"
+                declared_params.update(re.findall(r"#pragma\s+parameter\s+(\w+)", sp.read_text()))
+            if "parameters" in cfg and cfg["parameters"]:
+                for pname in cfg["parameters"].split(";"):
+                    pname = pname.strip()
+                    assert pname in declared_params, f"{rel} sets undeclared parameter {pname}"
+                    assert pname in cfg, f"{rel} lists {pname} in parameters without a value"
+            if n == 2:
+                assert cfg.get("scale_type0") == "source", f"{rel}: pass 0 must use scale_type0 = source"
+                assert float(cfg.get("scale0", "0")) == 1.0, f"{rel}: pass 0 must use scale0 = 1.0"
+                assert cfg.get("float_framebuffer0") == "true", f"{rel}: pass 0 must enable float_framebuffer0"
+                assert cfg.get("filter_linear1") == "true", f"{rel}: pass 1 must enable filter_linear1"
+            else:
+                assert "float_framebuffer0" not in cfg, f"{rel}: 1-pass preset must not request float_framebuffer0"
+                assert cfg.get("filter_linear0") == expected_filter0, f"{rel}: expected filter_linear0 = {expected_filter0}"
+
+    expected_shader_stems = {
+        "sharp-shimmerless-2-linearize",
+        "sharp-shimmerless-2-core",
+        "sharp-shimmerless-2-8bfbo-safe",
+        "sharp-shimmerless-2-fast",
+    }
+    for folder, ext in [("shaders_glsl/shaders", "glsl"), ("shaders_slang/shaders", "slang")]:
+        actual = {p.stem for p in (ROOT / folder).glob(f"*.{ext}")}
+        assert actual == expected_shader_stems, f"{folder}: expected {sorted(expected_shader_stems)}, got {sorted(actual)}"
+
+    # Verify all 9 extra GLSL variants live cleanly under shaders_glsl/extras/
+    extras_dir = ROOT / "shaders_glsl/extras"
+    actual_extras = {p.stem for p in extras_dir.glob("*.glslp")}
+    expected_extras = {f"sharp-shimmerless-2-{v}" for v in EXTRA_GLSL_VARIANTS}
+    assert actual_extras == expected_extras, f"extras mismatch: {sorted(actual_extras)}"
+    for stem in sorted(expected_extras):
+        p = extras_dir / f"{stem}.glslp"
+        cfg = parse_preset(p)
+        sp = (p.parent / cfg["shader0"]).resolve()
+        assert sp.exists(), f"{p} references missing shader0: {cfg['shader0']}"
+
+    # GLES defaults unqualified sampler2D to lowp; verify explicit SIZE_PRECISION on all core GLSL shaders.
+    for stem in sorted(expected_shader_stems):
+        rel = f"shaders_glsl/shaders/{stem}.glsl"
         src = (ROOT / rel).read_text()
         assert "uniform SIZE_PRECISION sampler2D Texture;" in src, f"{rel}: sampler2D must declare SIZE_PRECISION"
-    print("[PASS] Preset structure, GLES sampler precision, and parameter consistency (GLSL + Slang)")
+
+    # GLSL ES 3.00 requires fragment precision declaration before `out vec4 FragColor;`.
+    safe_frag = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-2-8bfbo-safe.glsl").read_text().split("#elif defined(FRAGMENT)", 1)[1]
+    assert safe_frag.index("precision highp float;") < safe_frag.index("out vec4 FragColor;"), (
+        "8bfbo-safe fragment precision must precede out vec4 FragColor for GLSL ES 3.00"
+    )
+
+    print("[PASS] Symmetrical 4-preset structure (GLSL + Slang), extras layout, GLES sampler precision, and parameters")
 
 
 def test_box_equivalence_and_padding(gl: GLContext) -> None:
-    core_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-core.glsl").read_text()
-    base_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless.glsl").read_text()
+    core_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-2-core.glsl").read_text()
+    fast_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-2-fast.glsl").read_text()
+    safe_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-2-8bfbo-safe.glsl").read_text()
 
     cases = [
         ((240, 160), (256, 256), (640, 427)),
@@ -417,11 +506,14 @@ def test_box_equivalence_and_padding(gl: GLContext) -> None:
     for in_sz, tex_sz, out_sz in cases:
         in_rgba = make_pattern_rgba(in_sz[0], in_sz[1], tex_sz[0], tex_sz[1], pad_rgb=(255, 0, 255))
         ref = exact_box_reference_2d(in_rgba, in_sz[0], in_sz[1], tex_sz[0], out_sz[0], out_sz[1])
-        for label, src, params in [
-            ("core(-fast)", core_src, {"FILTER_MODE": 0.0, "GAMMA_OUT": 0.0}),
-            ("sharp-shimmerless.glsl", base_src, {}),
+        for label, src, params, linear_in in [
+            ("core(srgb)", core_src, {"FILTER_MODE": 0.0, "GAMMA_OUT": 0.0}, True),
+            ("fast", fast_src, {}, True),
+            ("8bfbo-safe(srgb)", safe_src, {"FILTER_MODE": 0.0, "GAMMA_MODE": 0.0}, False),
         ]:
-            got = gl.render_1pass(src, in_rgba, in_sz, tex_sz, out_sz, params=params, defines=["PARAMETER_UNIFORM"])
+            got = gl.render_1pass(
+                src, in_rgba, in_sz, tex_sz, out_sz, params=params, defines=["PARAMETER_UNIFORM"], linear_input=linear_in
+            )
             max_err = 0.0
             for idx, (rr, rg, rb) in enumerate(ref):
                 off = 4 * idx
@@ -429,34 +521,168 @@ def test_box_equivalence_and_padding(gl: GLContext) -> None:
                 if err > max_err:
                     max_err = err
             assert max_err <= 1.5, f"{label} {in_sz}->{out_sz} (tex {tex_sz}): max_err={max_err:.2f}/255"
-    print(f"[PASS] Exact 2D box equivalence + padded-atlas safety across {len(cases)} resolutions")
+    print(f"[PASS] Exact 2D box equivalence + padded-atlas safety across {len(cases)} resolutions (fast, core, 8bfbo-safe)")
+
+
+def test_8bfbo_safe_linear_parity_and_shadows(gl: GLContext) -> None:
+    lin_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-2-linearize.glsl").read_text()
+    core_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-2-core.glsl").read_text()
+    safe_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-2-8bfbo-safe.glsl").read_text()
+
+    # Covers 1-tap interior, 2-tap horizontal edge (256x240->640x480), 2-tap vertical edge
+    # (256x240->1024x768), and 4-tap 2D corners + padded atlas (240x160->640x427).
+    res_cases = [
+        ((256, 240), (256, 256), (640, 480)),
+        ((256, 240), (256, 256), (1024, 768)),
+        ((240, 160), (256, 256), (640, 427)),
+    ]
+    mode_cases = [
+        ("box+gamma2", 0.0, 1.0, 0.0, 1.0),
+        ("box+srgb", 0.0, 2.0, 1.0, 2.0),
+        ("tent+gamma2", 1.0, 1.0, 0.0, 1.0),
+        ("hann+srgb", 2.0, 2.0, 1.0, 2.0),
+    ]
+    # First check 1-pass 8bfbo-safe directly against exact FP64 analytical math (<= 1.0/255)
+    # across 1-tap interior, 2-tap H/V edges, and 4-tap 2D corners with padded atlas.
+    exact_cases = [
+        ((64, 48), (64, 64), (160, 96)),
+        ((64, 48), (64, 64), (256, 154)),
+        ((60, 40), (64, 64), (160, 107)),
+    ]
+    for in_sz, tex_sz, out_sz in exact_cases:
+        in_rgba = make_pattern_rgba(in_sz[0], in_sz[1], tex_sz[0], tex_sz[1], pad_rgb=(255, 0, 255))
+        for label, fmode, safe_gm, _, _ in mode_cases:
+            got_1p = gl.render_1pass(
+                safe_src,
+                in_rgba,
+                in_sz,
+                tex_sz,
+                out_sz,
+                params={"FILTER_MODE": fmode, "GAMMA_MODE": safe_gm, "SNAP_INT_AXES": 1.0},
+                defines=["PARAMETER_UNIFORM"],
+                linear_input=False,
+            )
+            ref = exact_linear_reference_2d(in_rgba, in_sz[0], in_sz[1], tex_sz[0], out_sz[0], out_sz[1], fmode, safe_gm)
+            max_err = max(
+                max(abs(got_1p[4 * i] - r), abs(got_1p[4 * i + 1] - g), abs(got_1p[4 * i + 2] - b))
+                for i, (r, g, b) in enumerate(ref)
+            )
+            assert max_err <= 1.0, f"8bfbo-safe vs exact math {label} {in_sz}->{out_sz}: max_err={max_err:.2f}/255"
+
+    # Also verify full-resolution parity against 2-pass RGBA16F (<= 2/255 allows for GPU hardware
+    # 8-bit fixed-point bilinear weight quantization near black under sqrt() in 2-pass GL_LINEAR).
+    for in_sz, tex_sz, out_sz in res_cases:
+        in_rgba = make_pattern_rgba(in_sz[0], in_sz[1], tex_sz[0], tex_sz[1], pad_rgb=(255, 0, 255))
+        for label, fmode, safe_gm, p0_gm, p1_go in mode_cases:
+            got_1p = gl.render_1pass(
+                safe_src,
+                in_rgba,
+                in_sz,
+                tex_sz,
+                out_sz,
+                params={"FILTER_MODE": fmode, "GAMMA_MODE": safe_gm, "SNAP_INT_AXES": 1.0},
+                defines=["PARAMETER_UNIFORM"],
+                linear_input=False,
+            )
+            got_2p = gl.render_2pass(
+                lin_src,
+                core_src,
+                in_rgba,
+                in_sz,
+                tex_sz,
+                out_sz,
+                fbo0_tex_size=tex_sz,
+                fbo0_float=True,
+                pass0_params={"GAMMA_MODE": p0_gm},
+                pass1_params={"FILTER_MODE": fmode, "GAMMA_OUT": p1_go, "SNAP_INT_AXES": 1.0},
+            )
+            # Compare in linear light: hardware GL_LINEAR quantizes sub-texel weights to 8-bit
+            # fixed point (0.5/256 ~= 0.002 linear), which sqrt'(0) amplifies to ~11/255 in sRGB
+            # even though linear-light brightness differs by < 0.5%.
+            to_lin = (lambda u: (u / 255.0) ** 2) if safe_gm < 1.5 else (lambda u: srgb_to_linear(u / 255.0))
+            max_lin_diff = max(
+                max(
+                    abs(to_lin(got_1p[i]) - to_lin(got_2p[i])),
+                    abs(to_lin(got_1p[i + 1]) - to_lin(got_2p[i + 1])),
+                    abs(to_lin(got_1p[i + 2]) - to_lin(got_2p[i + 2])),
+                )
+                for i in range(0, len(got_1p), 4)
+            )
+            assert max_lin_diff <= 0.01, f"8bfbo-safe vs 2-pass {label} {in_sz}->{out_sz}: max_lin_diff={max_lin_diff:.4f}"
+
+    # Dark shadow preservation: values 0..24/255 (which crush to 0 on an 8-bit linear FBO)
+    # must survive intact with zero crushing at 3x integer scale and fractional scale.
+    w_in, h_in = 32, 8
+    dark_buf = bytearray(4 * w_in * h_in)
+    for y in range(h_in):
+        for x in range(w_in):
+            v = x  # 0..31/255
+            off = 4 * (y * w_in + x)
+            dark_buf[off : off + 4] = bytes((v, v, v, 255))
+    for gm in (1.0, 2.0):
+        out = gl.render_1pass(
+            safe_src,
+            bytes(dark_buf),
+            (w_in, h_in),
+            (w_in, h_in),
+            (w_in * 3, h_in * 3),
+            params={"FILTER_MODE": 0.0, "GAMMA_MODE": gm, "SNAP_INT_AXES": 1.0},
+            defines=["PARAMETER_UNIFORM"],
+            linear_input=False,
+        )
+        for x in range(w_in):
+            got_v = out[4 * (x * 3 + 1)]
+            assert got_v == x, f"Dark shadow {x}/255 corrupted to {got_v}/255 (GAMMA_MODE={gm})"
+
+    # Exact integer (3x, 5x) and half-integer (1.5x) scale purity: zero invscale rounding leakage
+    # on pure black/white checkerboards (even under gamma 2.0 sqrt) and zero NaN under exact sRGB.
+    for w_in, w_out, expect_exact_bw in [(240, 720, True), (240, 1200, True), (320, 480, False)]:
+        bw = bytearray(4 * w_in * 4)
+        for y in range(4):
+            for x in range(w_in):
+                v = 255 if ((x + y) % 2 == 0) else 0
+                bw[4 * (y * w_in + x) : 4 * (y * w_in + x) + 4] = bytes((v, 0, v, 255))
+        for gm in (1.0, 2.0):
+            out = gl.render_1pass(
+                safe_src, bytes(bw), (w_in, 4), (w_in, 4), (w_out, 4),
+                params={"FILTER_MODE": 0.0, "GAMMA_MODE": gm, "SNAP_INT_AXES": 1.0},
+                defines=["PARAMETER_UNIFORM"], linear_input=False,
+            )
+            if expect_exact_bw:
+                vals = {out[4 * i] for i in range(w_out * 4)}
+                assert vals == {0, 255}, f"8bfbo-safe {w_in}->{w_out} (GAMMA_MODE={gm}) leaked non-0/255 values: {sorted(vals)[:8]}"
+            # Pure-zero green channel must stay exact 0 (never NaN -> non-zero) on every edge/interior pixel.
+            assert all(out[4 * i + 1] == 0 for i in range(w_out * 4)), f"Zero channel corrupted at {w_in}->{w_out} (GAMMA_MODE={gm})"
+
+    print("[PASS] 1-pass 8bfbo-safe matches exact FP64 math (<=1/255) & 2-pass RGBA16F (<=1% linear) + 3x/5x/shadow exact")
 
 
 def test_fp16_drift_immunity(gl: GLContext) -> None:
-    core_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-core.glsl").read_text()
-    base_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless.glsl").read_text()
+    core_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-2-core.glsl").read_text()
+    fast_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-2-fast.glsl").read_text()
+    safe_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-2-8bfbo-safe.glsl").read_text()
+
+    # Stress COMPAT_PRECISION (mediump) scale varying on core.glsl while invscale remains highp.
     for in_sz, out_sz in [((240, 160), (1278, 852)), ((240, 160), (1272, 720))]:
         in_rgba = make_pattern_rgba(in_sz[0], in_sz[1], in_sz[0], in_sz[1])
+        sx = float16_round(out_sz[0] / in_sz[0])
+        sy = float16_round(out_sz[1] / in_sz[1])
         exact = gl.render_1pass(
             core_src, in_rgba, in_sz, in_sz, out_sz, params={"FILTER_MODE": 0.0, "GAMMA_OUT": 0.0}, defines=["PARAMETER_UNIFORM"]
         )
-        sx = float16_round(out_sz[0] / in_sz[0])
-        sy = float16_round(out_sz[1] / in_sz[1])
         assert "vec2 raw_scale = OutputSize / InputSize;" in core_src
         stressed_src = core_src.replace("vec2 raw_scale = OutputSize / InputSize;", f"vec2 raw_scale = vec2({sx!r}, {sy!r});")
         stressed = gl.render_1pass(
             stressed_src, in_rgba, in_sz, in_sz, out_sz, params={"FILTER_MODE": 0.0, "GAMMA_OUT": 0.0}, defines=["PARAMETER_UNIFORM"]
         )
-        diffs = [
-            max(abs(exact[i] - stressed[i]), abs(exact[i + 1] - stressed[i + 1]), abs(exact[i + 2] - stressed[i + 2]))
-            for i in range(0, len(exact), 4)
-        ]
-        assert max(diffs) <= 1, f"FP16 scale drift at {in_sz}->{out_sz}: max diff={max(diffs)}/255"
+        diff = max_rgb_diff(exact, stressed)
+        assert diff <= 1, f"core FP16 scale drift at {in_sz}->{out_sz}: max diff={diff}/255"
 
     # Exercise the !GL_FRAGMENT_PRECISION_HIGH split-FP16 shader path directly on GPU
-    for label, src, params in [
-        ("core(split-fp16)", core_src, {"FILTER_MODE": 0.0, "GAMMA_OUT": 0.0}),
-        ("base(split-fp16)", base_src, {}),
+    for label, src, params, linear_in in [
+        ("core(split-fp16)", core_src, {"FILTER_MODE": 0.0, "GAMMA_OUT": 0.0}, True),
+        ("fast(split-fp16)", fast_src, {}, True),
+        ("8bfbo-safe(split-fp16)", safe_src, {"FILTER_MODE": 0.0, "GAMMA_MODE": 0.0}, False),
     ]:
         for in_sz, tex_sz, out_sz in [((320, 240), (512, 256), (960, 720)), ((240, 160), (256, 256), (1278, 852))]:
             in_rgba = make_pattern_rgba(in_sz[0], in_sz[1], tex_sz[0], tex_sz[1])
@@ -469,6 +695,7 @@ def test_fp16_drift_immunity(gl: GLContext) -> None:
                 out_sz,
                 params=params,
                 defines=["PARAMETER_UNIFORM", "SHIMMERLESS_FORCE_SPLIT_FP16"],
+                linear_input=linear_in,
             )
             max_err = max(
                 max(abs(got[4 * i] - r), abs(got[4 * i + 1] - g), abs(got[4 * i + 2] - b))
@@ -476,8 +703,7 @@ def test_fp16_drift_immunity(gl: GLContext) -> None:
             )
             assert max_err <= 1.5, f"{label} {in_sz}->{out_sz}: max_err={max_err:.2f}/255"
 
-    # Strict end-to-end IEEE binary16 simulation of the !GL_FRAGMENT_PRECISION_HIGH centered split-FP16 path:
-    # models binary16 rounding of both the interpolated pixel coordinate AND the final texture UV.
+    # Strict end-to-end IEEE binary16 simulation of the !GL_FRAGMENT_PRECISION_HIGH centered split-FP16 path
     h = float16_round
     fp16_cases = [
         (320, 960, 512, 0.0, 0.0),
@@ -534,16 +760,15 @@ def test_fp16_drift_immunity(gl: GLContext) -> None:
                 assert abs(uv_fp16 * t_sz - 233.5) < 1e-4, f"240->1278 col 1245 drifted: {uv_fp16 * t_sz}"
         assert max_w_err <= w_tol, f"Binary16 split fallback {n_in}->{m_out}: max_w_err={max_w_err:.5f} > {w_tol}"
         assert max_uv_err <= uv_tol, f"Binary16 UV fallback {n_in}->{m_out}: max_uv_err={max_uv_err:.4f} > {uv_tol}"
-    print("[PASS] Issue #4 FP16 scale immunity + end-to-end binary16 centered split (320->960 & col 1245 exact)")
+    print("[PASS] Issue #4 FP16 scale immunity + split-FP16 GPU & binary16 simulation (core, fast, 8bfbo-safe)")
 
 
 def test_float_fbo_canary_fails_loud_on_rgba8(gl: GLContext) -> None:
-    lin_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-linearize.glsl").read_text()
-    core_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-core.glsl").read_text()
+    lin_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-2-linearize.glsl").read_text()
+    core_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-2-core.glsl").read_text()
     in_sz, out_sz = (16, 16), (32, 32)
     in_rgba = make_pattern_rgba(in_sz[0], in_sz[1], in_sz[0], in_sz[1])
 
-    # Real RGBA16F intermediate must render normally (never magenta error screen)
     ok_out = gl.render_2pass(
         lin_src,
         core_src,
@@ -557,7 +782,6 @@ def test_float_fbo_canary_fails_loud_on_rgba8(gl: GLContext) -> None:
     )
     assert any(ok_out[i + 1] > 0 for i in range(0, len(ok_out), 4)), "RGBA16F falsely triggered magenta canary"
 
-    # Simulated legacy gl2.c 8-bit RGBA8 fallback must fail loudly (100% solid magenta)
     err_out = gl.render_2pass(
         lin_src,
         core_src,
@@ -571,35 +795,39 @@ def test_float_fbo_canary_fails_loud_on_rgba8(gl: GLContext) -> None:
     )
     pixels = {(err_out[i], err_out[i + 1], err_out[i + 2]) for i in range(0, len(err_out), 4)}
     assert pixels == {(255, 0, 255)}, f"Expected solid magenta on RGBA8 fallback, got {pixels}"
-    print("[PASS] Float-FBO alpha canary: normal on RGBA16F, fails loud (solid magenta) on RGBA8 fallback")
+    print("[PASS] Modern 2-pass alpha canary: normal on RGBA16F, fails loud (solid magenta) on RGBA8 fallback")
 
 
 def test_downscale_fallback(gl: GLContext) -> None:
-    core_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-core.glsl").read_text()
+    core_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-2-core.glsl").read_text()
+    safe_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-2-8bfbo-safe.glsl").read_text()
     in_sz, out_sz = (640, 480), (320, 240)
-    # Smooth horizontal gradient should stay monotonically non-decreasing under downscale
     buf = bytearray(4 * in_sz[0] * in_sz[1])
     for y in range(in_sz[1]):
         for x in range(in_sz[0]):
             v = int(255 * x / (in_sz[0] - 1))
             off = 4 * (y * in_sz[0] + x)
             buf[off : off + 4] = bytes((v, v, v, 255))
-    got = gl.render_1pass(
-        core_src, bytes(buf), in_sz, in_sz, out_sz, params={"FILTER_MODE": 1.0, "GAMMA_OUT": 0.0}, defines=["PARAMETER_UNIFORM"]
-    )
-    row = [got[4 * x] for x in range(out_sz[0])]
-    assert all(row[i] <= row[i + 1] for i in range(len(row) - 1)), "Non-monotonic gradient on downscale"
-    assert row[0] <= 2 and row[-1] >= 253, f"Unexpected downscale endpoints: {row[0]}..{row[-1]}"
-    print("[PASS] Graceful bilinear fallback on downscaling (640x480 -> 320x240)")
+
+    for label, src, params, defines, linear_in in [
+        ("core", core_src, {"FILTER_MODE": 1.0, "GAMMA_OUT": 0.0}, ["PARAMETER_UNIFORM"], True),
+        ("8bfbo-safe(gamma2)", safe_src, {"FILTER_MODE": 1.0, "GAMMA_MODE": 1.0}, ["PARAMETER_UNIFORM"], False),
+        ("8bfbo-safe(split-fp16)", safe_src, {"FILTER_MODE": 0.0, "GAMMA_MODE": 1.0}, ["PARAMETER_UNIFORM", "SHIMMERLESS_FORCE_SPLIT_FP16"], False),
+    ]:
+        got = gl.render_1pass(src, bytes(buf), in_sz, in_sz, out_sz, params=params, defines=defines, linear_input=linear_in)
+        row = [got[4 * x] for x in range(out_sz[0])]
+        assert all(row[i] <= row[i + 1] for i in range(len(row) - 1)), f"{label}: non-monotonic gradient on downscale"
+        assert row[0] <= 2 and row[-1] >= 253, f"{label}: unexpected downscale endpoints: {row[0]}..{row[-1]}"
+    print("[PASS] Graceful bilinear fallback on downscaling (640x480 -> 320x240) for core and 8bfbo-safe")
 
 
 def test_luminance_conservation_and_smooth_hq(gl: GLContext) -> None:
-    lin_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-linearize.glsl").read_text()
-    core_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-core.glsl").read_text()
+    lin_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-2-linearize.glsl").read_text()
+    core_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-2-core.glsl").read_text()
+    safe_src = (ROOT / "shaders_glsl/shaders/sharp-shimmerless-2-8bfbo-safe.glsl").read_text()
 
     def measure_ripple(w_in: int, w_out: int, mode: str) -> float:
         totals = []
-        # Test 24 distinct texel positions so the 1-px white bar hits every fractional phase
         for col in range(10, 34):
             in_rgba = bytearray(4 * w_in)
             for x in range(w_in):
@@ -607,117 +835,107 @@ def test_luminance_conservation_and_smooth_hq(gl: GLContext) -> None:
                 in_rgba[4 * x : 4 * x + 4] = bytes((v, v, v, 255))
             if mode == "fast":
                 out = gl.render_1pass(
-                    core_src,
-                    bytes(in_rgba),
-                    (w_in, 1),
-                    (w_in, 1),
-                    (w_out, 1),
-                    params={"FILTER_MODE": 0.0, "GAMMA_OUT": 0.0},
-                    defines=["PARAMETER_UNIFORM"],
+                    core_src, bytes(in_rgba), (w_in, 1), (w_in, 1), (w_out, 1),
+                    params={"FILTER_MODE": 0.0, "GAMMA_OUT": 0.0}, defines=["PARAMETER_UNIFORM"],
                 )
-            elif mode == "gamma_fast":
+            elif mode == "modern_gamma2":
                 out = gl.render_2pass(
-                    lin_src,
-                    core_src,
-                    bytes(in_rgba),
-                    (w_in, 1),
-                    (w_in, 1),
-                    (w_out, 1),
+                    lin_src, core_src, bytes(in_rgba), (w_in, 1), (w_in, 1), (w_out, 1),
                     fbo0_tex_size=(256 if w_in <= 256 else 512, 1),
-                    pass0_params={"GAMMA_MODE": 0.0},
-                    pass1_params={"FILTER_MODE": 0.0, "GAMMA_OUT": 1.0},
+                    pass0_params={"GAMMA_MODE": 0.0}, pass1_params={"FILTER_MODE": 0.0, "GAMMA_OUT": 1.0},
                 )
-            elif mode == "gamma_exact":
+            elif mode == "modern_srgb":
                 out = gl.render_2pass(
-                    lin_src,
-                    core_src,
-                    bytes(in_rgba),
-                    (w_in, 1),
-                    (w_in, 1),
-                    (w_out, 1),
-                    pass0_params={"GAMMA_MODE": 1.0},
-                    pass1_params={"FILTER_MODE": 0.0, "GAMMA_OUT": 2.0},
+                    lin_src, core_src, bytes(in_rgba), (w_in, 1), (w_in, 1), (w_out, 1),
+                    pass0_params={"GAMMA_MODE": 1.0}, pass1_params={"FILTER_MODE": 0.0, "GAMMA_OUT": 2.0},
+                )
+            elif mode == "safe_gamma2":
+                out = gl.render_1pass(
+                    safe_src, bytes(in_rgba), (w_in, 1), (w_in, 1), (w_out, 1),
+                    params={"FILTER_MODE": 0.0, "GAMMA_MODE": 1.0}, defines=["PARAMETER_UNIFORM"], linear_input=False,
+                )
+            elif mode == "safe_srgb":
+                out = gl.render_1pass(
+                    safe_src, bytes(in_rgba), (w_in, 1), (w_in, 1), (w_out, 1),
+                    params={"FILTER_MODE": 0.0, "GAMMA_MODE": 2.0}, defines=["PARAMETER_UNIFORM"], linear_input=False,
                 )
             elif mode == "tent_exact":
                 out = gl.render_2pass(
-                    lin_src,
-                    core_src,
-                    bytes(in_rgba),
-                    (w_in, 1),
-                    (w_in, 1),
-                    (w_out, 1),
-                    pass0_params={"GAMMA_MODE": 1.0},
-                    pass1_params={"FILTER_MODE": 1.0, "GAMMA_OUT": 2.0, "SNAP_INT_AXES": 1.0},
+                    lin_src, core_src, bytes(in_rgba), (w_in, 1), (w_in, 1), (w_out, 1),
+                    pass0_params={"GAMMA_MODE": 1.0}, pass1_params={"FILTER_MODE": 1.0, "GAMMA_OUT": 2.0, "SNAP_INT_AXES": 1.0},
                 )
             elif mode == "hann_exact":
                 out = gl.render_2pass(
-                    lin_src,
-                    core_src,
-                    bytes(in_rgba),
-                    (w_in, 1),
-                    (w_in, 1),
-                    (w_out, 1),
-                    pass0_params={"GAMMA_MODE": 1.0},
-                    pass1_params={"FILTER_MODE": 2.0, "GAMMA_OUT": 2.0, "SNAP_INT_AXES": 1.0},
+                    lin_src, core_src, bytes(in_rgba), (w_in, 1), (w_in, 1), (w_out, 1),
+                    pass0_params={"GAMMA_MODE": 1.0}, pass1_params={"FILTER_MODE": 2.0, "GAMMA_OUT": 2.0, "SNAP_INT_AXES": 1.0},
+                )
+            elif mode == "safe_tent_exact":
+                out = gl.render_1pass(
+                    safe_src, bytes(in_rgba), (w_in, 1), (w_in, 1), (w_out, 1),
+                    params={"FILTER_MODE": 1.0, "GAMMA_MODE": 2.0, "SNAP_INT_AXES": 1.0},
+                    defines=["PARAMETER_UNIFORM"], linear_input=False,
                 )
             else:
                 raise ValueError(mode)
-            total_light = sum(srgb_to_linear(out[4 * x] / 255.0) for x in range(w_out))
-            totals.append(total_light)
+            totals.append(sum(srgb_to_linear(out[4 * x] / 255.0) for x in range(w_out)))
         return (max(totals) - min(totals)) / (sum(totals) / len(totals))
 
-    # 240 -> 320 (4/3x): classic severe sRGB shimmer case
     r_fast = measure_ripple(240, 320, "fast")
-    r_g2 = measure_ripple(240, 320, "gamma_fast")
-    r_srgb = measure_ripple(240, 320, "gamma_exact")
-    assert r_fast > 0.15, f"Expected large sRGB ripple on -fast, got {r_fast:.3f}"
-    assert r_g2 < 0.03, f"Fast gamma 2.0 ripple too high: {r_g2:.4f}"
-    assert r_srgb < 0.006, f"Exact sRGB ripple too high: {r_srgb:.4f}"
+    r_mod_g2 = measure_ripple(240, 320, "modern_gamma2")
+    r_mod_srgb = measure_ripple(240, 320, "modern_srgb")
+    r_safe_g2 = measure_ripple(240, 320, "safe_gamma2")
+    r_safe_srgb = measure_ripple(240, 320, "safe_srgb")
+    assert r_fast > 0.15, f"Expected large sRGB ripple on -non-gamma-fast, got {r_fast:.3f}"
+    assert r_mod_g2 < 0.03 and r_safe_g2 < 0.03, f"Fast gamma 2.0 ripple too high: modern={r_mod_g2:.4f}, safe={r_safe_g2:.4f}"
+    assert r_mod_srgb < 0.006 and r_safe_srgb < 0.006, f"Exact sRGB ripple too high: modern={r_mod_srgb:.4f}, safe={r_safe_srgb:.4f}"
 
-    # 320 -> 1024 (3.2x): Tent and Hann partition of unity
     r_tent = measure_ripple(320, 1024, "tent_exact")
     r_hann = measure_ripple(320, 1024, "hann_exact")
-    assert r_tent < 0.006, f"Tent ripple too high: {r_tent:.4f}"
-    assert r_hann < 0.006, f"Hann ripple too high: {r_hann:.4f}"
+    r_safe_tent = measure_ripple(320, 1024, "safe_tent_exact")
+    assert r_tent < 0.006 and r_hann < 0.006 and r_safe_tent < 0.006
 
-    # Integer axis snap check: 256 -> 1024 (exact 4x) in Smooth HQ mode must produce pure 0/255 pixels
+    # Integer axis snap check: 256 -> 1024 (exact 4x) must produce pure 0/255 pixels
     in_rgba = bytearray(4 * 256)
     for x in range(256):
         v = 255 if x % 2 == 0 else 0
         in_rgba[4 * x : 4 * x + 4] = bytes((v, v, v, 255))
-    out_snap = gl.render_2pass(
-        lin_src,
-        core_src,
-        bytes(in_rgba),
-        (256, 1),
-        (256, 1),
-        (1024, 1),
-        pass0_params={"GAMMA_MODE": 0.0},
-        pass1_params={"FILTER_MODE": 1.0, "GAMMA_OUT": 1.0, "SNAP_INT_AXES": 1.0},
+    out_snap_2p = gl.render_2pass(
+        lin_src, core_src, bytes(in_rgba), (256, 1), (256, 1), (1024, 1),
+        pass0_params={"GAMMA_MODE": 0.0}, pass1_params={"FILTER_MODE": 1.0, "GAMMA_OUT": 1.0, "SNAP_INT_AXES": 1.0},
     )
-    unique_vals = {out_snap[4 * x] for x in range(1024)}
-    assert unique_vals == {0, 255}, f"Integer 4x axis should snap cleanly to Box, got values {sorted(unique_vals)[:10]}"
+    out_snap_1p = gl.render_1pass(
+        safe_src, bytes(in_rgba), (256, 1), (256, 1), (1024, 1),
+        params={"FILTER_MODE": 1.0, "GAMMA_MODE": 1.0, "SNAP_INT_AXES": 1.0},
+        defines=["PARAMETER_UNIFORM"], linear_input=False,
+    )
+    assert {out_snap_2p[4 * x] for x in range(1024)} == {0, 255}
+    assert {out_snap_1p[4 * x] for x in range(1024)} == {0, 255}
 
     print(
-        f"[PASS] Luminance ripple 240->320: -fast={r_fast*100:.1f}%, gamma2={r_g2*100:.2f}%, exact_sRGB={r_srgb*100:.2f}%"
-        f" | 320->1024 Tent={r_tent*100:.2f}%, Hann={r_hann*100:.2f}% | 4x integer auto-snap exact"
+        f"[PASS] Luminance ripple 240->320: fast={r_fast*100:.1f}%, modern_g2={r_mod_g2*100:.2f}%, "
+        f"safe_g2={r_safe_g2*100:.2f}%, safe_sRGB={r_safe_srgb*100:.2f}% | "
+        f"320->1024 Tent={r_tent*100:.2f}%, SafeTent={r_safe_tent*100:.2f}%, Hann={r_hann*100:.2f}% | 4x snap exact"
     )
 
 
-def test_slang_syntax_parity(gl: GLContext) -> None:
-    """Validate Slang shader structure and compile equivalent GLSL 120/core logic."""
-    for rel in ["shaders_slang/shaders/sharp-shimmerless-linearize.slang", "shaders_slang/shaders/sharp-shimmerless-core.slang"]:
+def test_slang_syntax_parity() -> None:
+    """Validate Slang shader structure and push-constant parameter parity."""
+    for rel in [
+        "shaders_slang/shaders/sharp-shimmerless-2-linearize.slang",
+        "shaders_slang/shaders/sharp-shimmerless-2-core.slang",
+        "shaders_slang/shaders/sharp-shimmerless-2-8bfbo-safe.slang",
+        "shaders_slang/shaders/sharp-shimmerless-2-fast.slang",
+    ]:
         src = (ROOT / rel).read_text()
         assert "#version 450" in src, f"{rel} missing #version 450"
         assert "#pragma stage vertex" in src and "#pragma stage fragment" in src, f"{rel} missing stage pragmas"
         assert "layout(push_constant) uniform Push" in src, f"{rel} missing Push block"
         assert "layout(std140, set = 0, binding = 0) uniform UBO" in src, f"{rel} missing UBO block"
         assert "layout(set = 0, binding = 2) uniform sampler2D Source;" in src, f"{rel} missing Source sampler"
-        # Verify every #pragma parameter appears inside Push
         push_block = src.split("layout(push_constant) uniform Push", 1)[1].split("}", 1)[0]
         for pname in re.findall(r"#pragma\s+parameter\s+(\w+)", src):
             assert re.search(rf"\bfloat\s+{pname}\b", push_block), f"{rel} parameter {pname} missing from Push block"
-    print("[PASS] Slang shader structural & push-constant parameter checks")
+    print("[PASS] Slang shader structural & push-constant parameter checks (all 4 shaders)")
 
 
 def main() -> int:
@@ -725,11 +943,12 @@ def main() -> int:
     print(f"OpenGL context: {gl.version}")
     test_presets_and_structure()
     test_box_equivalence_and_padding(gl)
+    test_8bfbo_safe_linear_parity_and_shadows(gl)
     test_fp16_drift_immunity(gl)
     test_float_fbo_canary_fails_loud_on_rgba8(gl)
     test_downscale_fallback(gl)
     test_luminance_conservation_and_smooth_hq(gl)
-    test_slang_syntax_parity(gl)
+    test_slang_syntax_parity()
     print("\nALL VERIFICATION CHECKS PASSED.")
     return 0
 

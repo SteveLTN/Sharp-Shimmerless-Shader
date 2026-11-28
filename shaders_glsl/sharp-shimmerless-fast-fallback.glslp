@@ -1,8 +1,0 @@
-shaders = 1
-
-shader0 = shaders/sharp-shimmerless-core.glsl
-filter_linear0 = true
-
-parameters = "FILTER_MODE;GAMMA_OUT"
-FILTER_MODE = "0.000000"
-GAMMA_OUT = "0.000000"

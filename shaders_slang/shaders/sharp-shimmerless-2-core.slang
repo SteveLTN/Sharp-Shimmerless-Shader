@@ -1,7 +1,7 @@
 #version 450
 
 /*
- * sharp-shimmerless-core
+ * sharp-shimmerless-2-core
  * Author: zadpos (analytical single-tap core & linear-light band-limiting)
  * License: Public domain
  *

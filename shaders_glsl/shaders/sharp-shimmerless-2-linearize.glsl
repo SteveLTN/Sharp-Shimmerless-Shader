@@ -1,9 +1,9 @@
 /*
- * sharp-shimmerless-linearize
+ * sharp-shimmerless-2-linearize
  * License: Public domain
  *
  * Pass 0 (1x source resolution): converts gamma-encoded RGB input into linear light
- * for hardware-accelerated bilinear blending in sharp-shimmerless-core.
+ * for hardware-accelerated bilinear blending in sharp-shimmerless-2-core.
  * Writes alpha = 2.0 as an unclamped float-FBO canary so Pass 1 can detect silent
  * 8-bit RGBA8 fallbacks on legacy GL drivers instead of crushing shadows.
  */

@@ -1,8 +1,8 @@
 # Agent Guide: RetroArch Handheld Deployment
 
-This guide is part of [SteveLTN/Sharp-Shimmerless-Shader](https://github.com/SteveLTN/Sharp-Shimmerless-Shader). Use the shader sources and presets from that repository, and follow this guide to recommend, install, and configure them. For Rocknix devices, also read [the Rocknix quirks guide](https://github.com/SteveLTN/Sharp-Shimmerless-Shader/blob/main/ROCKNIX-QUIRKS.md).
+This guide is part of [SteveLTN/Sharp-Shimmerless-Shader-2](https://github.com/SteveLTN/Sharp-Shimmerless-Shader-2). Use the shader sources and presets from that repository, and follow this guide to recommend, install, and configure them. For Rocknix devices, also read [the Rocknix quirks guide](https://github.com/SteveLTN/Sharp-Shimmerless-Shader-2/blob/main/ROCKNIX-QUIRKS.md).
 
-This guide is for AI agents and humans installing or updating Sharp-Shimmerless on RetroArch handhelds and similar embedded devices. It is operating-system agnostic: discover the device's actual layout instead of assuming Rocknix paths, card numbering, account names, or configuration mechanisms.
+This guide is for AI agents and humans installing or updating Sharp-Shimmerless-2 on RetroArch handhelds and similar embedded devices. It is operating-system agnostic: discover the device's actual layout instead of assuming Rocknix paths, card numbering, account names, or configuration mechanisms.
 
 Platform-specific behavior lives in separate [quirks references](#platform-specific-quirks), which provide verified examples rather than universal layouts.
 
@@ -41,19 +41,20 @@ Select the shader language from RetroArch's active video driver:
 | `vulkan` | `shaders_slang/` | Preferred where the device and core work correctly with Vulkan. |
 | `glcore` | `shaders_slang/` | Use Slang rather than the legacy GLSL presets. |
 | `metal`, `d3d11`, `d3d12` | `shaders_slang/` | Relevant to non-Linux RetroArch systems using the same shader package. |
-| `gl` / OpenGL ES | `shaders_glsl/` | Legacy GLSL path. Two-pass presets require a working filterable float framebuffer. |
+| `gl` / OpenGL ES | `shaders_glsl/` | Legacy GLSL path. Use `-gamma-8bfbo-safe` (or `-non-gamma-fast`) when float FBOs are unavailable. |
 
-Then select the filtering preset:
+Then select from the 4 symmetrical presets (identical names in both `shaders_glsl/` and `shaders_slang/`):
 
-| Preset | Passes | Intended use |
-| --- | ---: | --- |
-| `sharp-shimmerless` | 2 | Standard exact Box filter and the default for 640×480/general displays. |
-| `sharp-shimmerless-smooth-hq` | 2 | Higher-quality Tent filter for high-PPI displays; not the requested standard variant unless explicitly selected. |
-| `sharp-shimmerless-fast-fallback` | 1 | Compatibility/performance path that avoids the floating-point intermediate. |
+| Preset | Passes | Float FBO | Intended use |
+| --- | ---: | :---: | --- |
+| `sharp-shimmerless-2-gamma-modern` | 2 | Yes | Default for modern drivers (`vulkan`, `glcore`, `metal`, `d3d11/12`, desktop `gl`) on 640×480 / general displays. |
+| `sharp-shimmerless-2-gamma-8bfbo-safe` | 1 | No | Recommended linear-light preset for legacy `gl` / GLES drivers without float FBOs (adaptive 1/2/4-tap fast γ = 2.0, zero FBO overhead). |
+| `sharp-shimmerless-2-non-gamma-fast` | 1 | No | Maximum-speed 1-tap sRGB path for ultra-constrained GPUs. |
+| `sharp-shimmerless-2-gamma-modern-hq` | 2 | Yes | Smooth Tent/Hann filter with integer-axis snap for high-PPI displays on modern drivers. |
 
-The two-pass presets set `float_framebuffer0 = true`. On legacy `gl`, RetroArch may silently substitute an 8-bit UNORM intermediate. The shader detects this with an alpha canary and intentionally displays solid magenta rather than crushing dark colors.
+The two-pass `-gamma-modern` presets set `float_framebuffer0 = true`. On legacy `gl`, RetroArch may silently substitute an 8-bit UNORM intermediate. The shader detects this with an alpha canary and intentionally displays solid magenta rather than crushing dark colors.
 
-A magenta screen means the current driver/FBO path is incompatible with the two-pass preset. It does not identify a defective shader file. Confirm the driver and logs, then ask the owner before switching to Slang with another driver or choosing the one-pass fallback.
+A magenta screen means the current driver/FBO path is incompatible with the 2-pass `-gamma-modern` preset. It does not identify a defective shader file. Confirm the driver and logs, then offer to switch to **`sharp-shimmerless-2-gamma-8bfbo-safe.glslp`** (stays on `gl` with linear-light gamma) or switch to Slang with `vulkan` / `glcore`.
 
 ## Discover the device before deployment
 

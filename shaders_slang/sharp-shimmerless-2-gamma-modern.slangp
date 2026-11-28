@@ -1,15 +1,15 @@
 shaders = 2
 
-shader0 = shaders/sharp-shimmerless-linearize.glsl
+shader0 = "shaders/sharp-shimmerless-2-linearize.slang"
 filter_linear0 = false
 scale_type0 = source
 scale0 = 1.0
 float_framebuffer0 = true
 
-shader1 = shaders/sharp-shimmerless-core.glsl
+shader1 = "shaders/sharp-shimmerless-2-core.slang"
 filter_linear1 = true
 
 parameters = "GAMMA_MODE;FILTER_MODE;GAMMA_OUT"
-GAMMA_MODE = "1.000000"
+GAMMA_MODE = "0.000000"
 FILTER_MODE = "0.000000"
-GAMMA_OUT = "2.000000"
+GAMMA_OUT = "1.000000"

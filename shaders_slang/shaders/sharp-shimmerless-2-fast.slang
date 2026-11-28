@@ -1,7 +1,7 @@
 #version 450
 
 /*
- * sharp-shimmerless
+ * sharp-shimmerless-2-fast
  * Author: zadpos
  * License: Public domain
  *
